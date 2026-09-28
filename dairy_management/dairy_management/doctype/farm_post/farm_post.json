@@ -1,0 +1,58 @@
+{
+  "doctype": "DocType",
+  "name": "Farm Post",
+  "module": "Dairy Management",
+  "custom": 1,
+  "engine": "InnoDB",
+  "track_changes": 1,
+  "fields": [
+    {
+      "fieldname": "author",
+      "label": "Author",
+      "fieldtype": "Data"
+    },
+    {
+      "fieldname": "content",
+      "label": "Content",
+      "fieldtype": "Long Text",
+      "reqd": 1
+    },
+    {
+      "fieldname": "cover_image",
+      "label": "Cover Image",
+      "fieldtype": "Attach Image"
+    },
+    {
+      "fieldname": "status",
+      "label": "Status",
+      "fieldtype": "Select",
+      "options": "Draft\nPublished\nHidden",
+      "default": "Published"
+    },
+    {
+      "fieldname": "like_count",
+      "label": "Like Count",
+      "fieldtype": "Int",
+      "default": 0,
+      "read_only": 1
+    },
+    {
+      "fieldname": "comment_count",
+      "label": "Comment Count",
+      "fieldtype": "Int",
+      "default": 0,
+      "read_only": 1
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "report": 1,
+      "export": 1
+    }
+  ]
+}

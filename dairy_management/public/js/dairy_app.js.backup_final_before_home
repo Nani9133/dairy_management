@@ -1,0 +1,1221 @@
+(() => {
+    const root = document.getElementById("dairy-root");
+
+    const state = {
+        view: "home",
+        products: [],
+        offers: [],
+        upcoming: [],
+        delivered: [],
+        posts: [],
+        wallet: 0,
+        cart: [],
+        category: "All",
+        orderTab: "upcoming"
+    };
+
+    const esc = (value) =>
+        String(value ?? "")
+            .replace(/[&<>"']/g, (m) => ({
+                "&": "&amp;",
+                "<": "&lt;",
+                ">": "&gt;",
+                '"': "&quot;",
+                "'": "&#39;"
+            }[m]));
+
+    const money = (value) => DairyApp.money(value);
+
+    const empty = (text) =>
+        `<div class="card" style="text-align:center;color:#7c8781">${esc(text)}</div>`;
+
+    async function api(method, args = {}) {
+        try {
+            return await DairyApp.call(method, args);
+        } catch (error) {
+            console.error(`Dairy API error: ${method}`, error);
+            toast("Something went wrong. Please try again.");
+            return { message: [] };
+        }
+    }
+
+    function toast(message) {
+        const old = document.querySelector(".dairy-toast");
+        if (old) old.remove();
+
+        const box = document.createElement("div");
+        box.className = "toast dairy-toast";
+        box.textContent = message;
+        document.body.appendChild(box);
+
+        setTimeout(() => box.remove(), 2200);
+    }
+
+    function bind() {
+        document.querySelectorAll("[data-view]").forEach((button) => {
+            button.onclick = () => {
+                state.view = button.dataset.view;
+                render();
+            };
+        });
+    }
+
+    function header(title, subtitle = "Fresh dairy delivered to your door") {
+        return `
+            <div class="dairy-header">
+                <div class="dairy-header-main">
+                    <div class="dairy-title">${esc(title)}</div>
+                    <div class="dairy-sub">${esc(subtitle)}</div>
+                </div>
+
+                <div class="wallet-pill">
+                    ${money(state.wallet)}
+                </div>
+            </div>
+        `;
+    }
+
+    function nav(active) {
+        const items = [
+            ["home", "⌂", "Home"],
+            ["products", "▦", "Products"],
+            ["orders", "▤", "Orders"],
+            ["offers", "🏷", "Offers"],
+            ["account", "♙", "Account"]
+        ];
+
+        return `
+            <div class="bottom-nav">
+                ${items.map(([view, icon, label]) => `
+                    <button
+                        class="nav-item ${active === view ? "active" : ""}"
+                        data-view="${view}"
+                    >
+                        <span class="nav-icon">${icon}</span>
+                        ${label}
+                    </button>
+                `).join("")}
+            </div>
+        `;
+    }
+
+    function cartButton() {
+        if (!state.cart.length) return "";
+
+        const count = state.cart.reduce((sum, item) => sum + item.qty, 0);
+        const total = state.cart.reduce(
+            (sum, item) => sum + (Number(item.price) * item.qty),
+            0
+        );
+
+        return `
+            <div class="card" style="position:sticky;bottom:70px;z-index:10">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <div>
+                        <b>${count} item${count > 1 ? "s" : ""} in cart</b>
+                        <div class="dairy-sub">${money(total)}</div>
+                    </div>
+                    <button class="btn btn-primary" onclick="showCart()">
+                        View Cart
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    function orderCard(order) {
+        const date = order.delivery_date
+            ? new Date(order.delivery_date)
+            : null;
+
+        const day = date && !isNaN(date)
+            ? date.getDate()
+            : "—";
+
+        const month = date && !isNaN(date)
+            ? date.toLocaleString("en", { month: "short" })
+            : "";
+
+        const isPaused = order.status === "Paused";
+        const action = isPaused ? "resume" : "pause";
+
+        return `
+            <div class="card order-row">
+                <div class="date-box">
+                    <b>${day}</b>
+                    <div>${month}</div>
+                </div>
+
+                <div style="flex:1">
+                    <div style="
+                        display:flex;
+                        justify-content:space-between;
+                        gap:8px;
+                        align-items:center;
+                    ">
+                        <b>${esc(order.item_summary || order.name)}</b>
+
+                        <span class="status ${isPaused ? "pause" : "ok"}">
+                            ${esc(order.status || "Upcoming")}
+                        </span>
+                    </div>
+
+                    <div class="dairy-sub">
+                        Delivery by ${esc(order.delivery_time || "7:00 AM")}
+                    </div>
+
+                    <div style="margin-top:7px;font-weight:800">
+                        ${money(order.order_total)}
+                    </div>
+
+                    <div style="display:flex;gap:6px;margin-top:10px">
+                        <button
+                            class="btn btn-light"
+                            onclick="toggleOrder('${esc(order.name)}','${action}')"
+                        >
+                            ${isPaused ? "Resume" : "Pause"}
+                        </button>
+
+                        <button
+                            class="btn btn-primary"
+                            onclick="addItems('${esc(order.name)}')"
+                        >
+                            + Add Items
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function home() {
+        return `
+            ${header("Hi, Sarath 👋")}
+
+            <div class="dairy-section">
+                <div class="hero">
+                    <b style="font-size:27px">
+                        Pure Milk.<br>
+                        Healthy Life.
+                    </b>
+
+                    <p>
+                        Farm fresh dairy delivered to your home.
+                    </p>
+
+                    <button
+                        class="btn btn-light"
+                        data-view="products"
+                    >
+                        Shop Now
+                    </button>
+                </div>
+            </div>
+
+            <div class="dairy-section">
+                <h3>Categories</h3>
+
+                <div class="chips">
+                    ${[
+                        "Milk",
+                        "Curd",
+                        "Paneer",
+                        "Ghee",
+                        "Beverages",
+                        "Snacks"
+                    ].map((category) => `
+                        <span
+                            class="chip"
+                            onclick="openCategory('${category}')"
+                            style="cursor:pointer"
+                        >
+                            ${category}
+                        </span>
+                    `).join("")}
+                </div>
+            </div>
+
+            <div class="dairy-section">
+                <div style="
+                    display:flex;
+                    justify-content:space-between;
+                    align-items:center;
+                ">
+                    <h3>Today's Offers</h3>
+
+                    <button
+                        class="btn btn-light"
+                        data-view="offers"
+                    >
+                        View All
+                    </button>
+                </div>
+
+                ${
+                    state.offers.slice(0, 3).map((offer) => `
+                        <div class="offer">
+                            <strong>${esc(offer.title)}</strong>
+                            <p>
+                                ${esc(
+                                    offer.description ||
+                                    "Special dairy offer"
+                                )}
+                            </p>
+                        </div>
+                    `).join("") ||
+                    empty("No active offers")
+                }
+            </div>
+
+            <div class="dairy-section">
+                <div style="
+                    display:flex;
+                    justify-content:space-between;
+                    align-items:center;
+                ">
+                    <h3>Upcoming Orders</h3>
+
+                    <button
+                        class="btn btn-light"
+                        data-view="orders"
+                    >
+                        View All
+                    </button>
+                </div>
+
+                ${
+                    state.upcoming.slice(0, 2).map(orderCard).join("") ||
+                    empty("No upcoming orders")
+                }
+            </div>
+
+            ${nav("home")}
+        `;
+    }
+
+    function products() {
+        const categories = [
+            "All",
+            "Milk",
+            "Curd",
+            "Paneer",
+            "Ghee",
+            "Beverages",
+            "Snacks",
+            "Organic",
+            "Others"
+        ];
+
+        const searchText =
+            document.getElementById("product-search")?.value
+                ?.toLowerCase() || "";
+
+        let products = state.products.filter((product) => {
+            const name = String(
+                product.item_name || product.name || ""
+            ).toLowerCase();
+
+            const category = String(
+                product.item_group || product.category || ""
+            ).toLowerCase();
+
+            const matchesSearch =
+                !searchText ||
+                name.includes(searchText) ||
+                category.includes(searchText);
+
+            const matchesCategory =
+                state.category === "All" ||
+                category === state.category.toLowerCase() ||
+                name.includes(state.category.toLowerCase());
+
+            return matchesSearch && matchesCategory;
+        });
+
+        return `
+            ${header("Products", "Fresh dairy products")}
+
+            <div class="dairy-section">
+                <input
+                    id="product-search"
+                    value="${esc(searchText)}"
+                    style="
+                        width:100%;
+                        padding:13px;
+                        border:1px solid #dde6df;
+                        border-radius:12px;
+                    "
+                    placeholder="Search milk, curd, paneer..."
+                    oninput="filterProducts()"
+                >
+            </div>
+
+            <div class="dairy-section">
+                <div style="
+                    display:grid;
+                    grid-template-columns:105px 1fr;
+                    gap:10px;
+                ">
+                    <div>
+                        <div
+                            class="card"
+                            style="
+                                position:sticky;
+                                top:8px;
+                            "
+                        >
+                            ${categories.map((category) => `
+                                <div
+                                    class="chip ${
+                                        state.category === category
+                                            ? "active"
+                                            : ""
+                                    }"
+                                    style="
+                                        margin-bottom:7px;
+                                        cursor:pointer;
+                                    "
+                                    onclick="openCategory('${category}')"
+                                >
+                                    ${category}
+                                </div>
+                            `).join("")}
+                        </div>
+                    </div>
+
+                    <div id="product-list">
+                        ${
+                            products.map((product) => `
+                                <div class="card product">
+                                    <img
+                                        src="${esc(
+                                            product.image ||
+                                            "/assets/frappe/images/ui/avatar.png"
+                                        )}"
+                                    >
+
+                                    <div style="flex:1">
+                                        <b>
+                                            ${esc(
+                                                product.item_name ||
+                                                product.name
+                                            )}
+                                        </b>
+
+                                        <div class="dairy-sub">
+                                            ${esc(
+                                                product.stock_uom ||
+                                                "Unit"
+                                            )}
+                                        </div>
+
+                                        <div class="price">
+                                            ${money(product.standard_rate)}
+                                        </div>
+                                    </div>
+
+                                    <button
+                                        class="btn btn-primary"
+                                        onclick="addToCart(
+                                            '${esc(product.name)}'
+                                        )"
+                                    >
+                                        Add
+                                    </button>
+                                </div>
+                            `).join("") ||
+                            empty("No products found")
+                        }
+                    </div>
+                </div>
+            </div>
+
+            ${cartButton()}
+            ${nav("products")}
+        `;
+    }
+
+    function offers() {
+        return `
+            ${header("Offers", "Special prices for you")}
+
+            <div class="dairy-section">
+                <div class="chips">
+                    ${["All", "Milk", "Paneer", "Ghee", "Other"]
+                        .map((item, index) => `
+                            <span
+                                class="chip ${
+                                    index === 0 ? "active" : ""
+                                }"
+                            >
+                                ${item}
+                            </span>
+                        `).join("")}
+                </div>
+            </div>
+
+            <div class="dairy-section">
+                ${
+                    state.offers.map((offer) => `
+                        <div class="offer">
+                            <strong>${esc(offer.title)}</strong>
+
+                            <p>
+                                ${esc(offer.description || "")}
+                            </p>
+
+                            ${
+                                offer.discount_percentage
+                                    ? `<b>${offer.discount_percentage}% OFF</b>`
+                                    : ""
+                            }
+
+                            ${
+                                offer.discount_amount
+                                    ? `<b>${money(
+                                        offer.discount_amount
+                                    )} OFF</b>`
+                                    : ""
+                            }
+                        </div>
+                    `).join("") ||
+                    empty("No active offers")
+                }
+            </div>
+
+            ${nav("offers")}
+        `;
+    }
+
+    function deliveredOrderCard(order) {
+        return `
+            <div class="card">
+                <b>${esc(order.item_summary || order.name)}</b>
+
+                <div class="dairy-sub">
+                    Delivered at ${
+                        esc(
+                            order.delivered_at ||
+                            order.delivery_date ||
+                            "—"
+                        )
+                    }
+                </div>
+
+                <div style="
+                    font-weight:800;
+                    margin-top:8px;
+                ">
+                    Order Total: ${money(order.order_total)}
+                </div>
+
+                <div style="margin-top:8px">
+                    ${
+                        order.proof_of_delivery
+                            ? `
+                                <a
+                                    href="${esc(
+                                        order.proof_of_delivery
+                                    )}"
+                                    target="_blank"
+                                >
+                                    View Proof of Delivery
+                                </a>
+                            `
+                            : "Proof not uploaded"
+                    }
+                </div>
+            </div>
+        `;
+    }
+
+    function orders() {
+        const showingUpcoming = state.orderTab === "upcoming";
+
+        return `
+            ${header("My Orders", "Track your dairy deliveries")}
+
+            <div class="dairy-section">
+                <div class="chips">
+                    <span
+                        class="chip ${
+                            showingUpcoming ? "active" : ""
+                        }"
+                        onclick="setOrderTab('upcoming')"
+                        style="cursor:pointer"
+                    >
+                        Upcoming
+                    </span>
+
+                    <span
+                        class="chip ${
+                            !showingUpcoming ? "active" : ""
+                        }"
+                        onclick="setOrderTab('delivered')"
+                        style="cursor:pointer"
+                    >
+                        Delivered
+                    </span>
+                </div>
+            </div>
+
+            <div class="dairy-section">
+                ${
+                    showingUpcoming
+                        ? `
+                            <h3>Upcoming</h3>
+
+                            ${
+                                state.upcoming.map(orderCard).join("") ||
+                                empty("No upcoming orders")
+                            }
+                        `
+                        : `
+                            <h3>Delivered</h3>
+
+                            ${
+                                state.delivered
+                                    .map(deliveredOrderCard)
+                                    .join("") ||
+                                empty("No delivered orders")
+                            }
+                        `
+                }
+            </div>
+
+            ${nav("orders")}
+        `;
+    }
+
+    function account() {
+        return `
+            ${header("Account", "Your profile and payments")}
+
+            <div class="dairy-section">
+
+                <div class="card">
+                    <b>Customer Profile</b>
+
+                    <p class="dairy-sub">
+                        Profile, address and payment methods
+                    </p>
+                </div>
+
+                <div class="card">
+                    <b>Wallet</b>
+
+                    <div class="price">
+                        ${money(state.wallet)}
+                    </div>
+
+                    <button
+                        class="btn btn-primary"
+                        onclick="addMoney()"
+                    >
+                        + Add Money
+                    </button>
+                </div>
+
+                <div class="card">
+                    <b>Invoices</b>
+
+                    <p class="dairy-sub">
+                        Order and subscription invoices
+                    </p>
+
+                    <button
+                        class="btn btn-light"
+                        onclick="showInvoices()"
+                    >
+                        View Invoices
+                    </button>
+                </div>
+
+                <div class="card">
+                    <b>Farm Visits</b>
+
+                    <p class="dairy-sub">
+                        Bookings and visit history
+                    </p>
+
+                    <button
+                        class="btn btn-light"
+                        onclick="showFarm()"
+                    >
+                        Open Farm Visit
+                    </button>
+                </div>
+
+            </div>
+
+            ${nav("account")}
+        `;
+    }
+
+    function postCard(post) {
+        return `
+            <div class="card farm-post">
+                <b>${esc(post.author || "Farm Team")}</b>
+
+                <div class="dairy-sub">
+                    ${esc(post.creation || "")}
+                </div>
+
+                <p>${esc(post.content || "")}</p>
+
+                ${
+                    post.cover_image
+                        ? `
+                            <img src="${esc(post.cover_image)}">
+                        `
+                        : ""
+                }
+
+                <div class="actions">
+                    <button
+                        class="btn btn-light"
+                        onclick="likePost('${esc(post.name)}')"
+                    >
+                        ♥ ${post.like_count || 0}
+                    </button>
+
+                    <button
+                        class="btn btn-light"
+                        onclick="commentPost('${esc(post.name)}')"
+                    >
+                        💬 ${post.comment_count || 0}
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    function farm() {
+        return `
+            ${header(
+                "Farm Visit",
+                "Experience our farms and meet our farmers"
+            )}
+
+            <div class="dairy-section">
+                <div style="
+                    display:flex;
+                    justify-content:flex-end;
+                    margin-bottom:10px;
+                ">
+                    <button
+                        class="btn btn-primary"
+                        onclick="showBooking()"
+                    >
+                        Book Farm Visit
+                    </button>
+                </div>
+
+                <div class="hero">
+                    <b style="font-size:25px">
+                        Real Farms. Real Food.
+                    </b>
+
+                    <p>
+                        See our cows, farms and how your milk
+                        is produced.
+                    </p>
+                </div>
+            </div>
+
+            <div class="dairy-section">
+                <h3>Farm Posts</h3>
+
+                <div style="
+                    display:flex;
+                    justify-content:flex-end;
+                    margin-bottom:10px;
+                ">
+                    <button
+                        class="btn btn-light"
+                        onclick="showPostForm()"
+                    >
+                        + Add Post
+                    </button>
+                </div>
+
+                ${
+                    state.posts.map(postCard).join("") ||
+                    empty("No farm posts yet")
+                }
+            </div>
+
+            ${nav("")}
+        `;
+    }
+
+    function showBooking() {
+        root.innerHTML = `
+            ${header(
+                "Book Farm Visit",
+                "Choose your visit date and guests"
+            )}
+
+            <div class="dairy-section">
+                <div class="card">
+
+                    <div class="form-row">
+                        <label>Select Date</label>
+
+                        <input
+                            id="visit-date"
+                            type="date"
+                        >
+                    </div>
+
+                    <div class="form-row">
+                        <label>Number of Guests</label>
+
+                        <input
+                            id="visit-guests"
+                            type="number"
+                            min="1"
+                            value="2"
+                        >
+                    </div>
+
+                    <div class="form-row">
+                        <label>Special Request</label>
+
+                        <textarea
+                            id="visit-note"
+                        ></textarea>
+                    </div>
+
+                    <button
+                        class="btn btn-primary"
+                        onclick="submitVisit()"
+                    >
+                        Continue to Payment
+                    </button>
+
+                </div>
+            </div>
+
+            ${nav("")}
+        `;
+    }
+
+    async function submitVisit() {
+        const date =
+            document.getElementById("visit-date")?.value;
+
+        const guests =
+            document.getElementById("visit-guests")?.value;
+
+        const note =
+            document.getElementById("visit-note")?.value;
+
+        if (!date) {
+            toast("Please select a visit date.");
+            return;
+        }
+
+        const result = await api("book_farm_visit", {
+            visit_date: date,
+            guests,
+            special_request: note
+        });
+
+        if (result.message?.payment_required) {
+            location.href =
+                "/payment-request?reference=" +
+                encodeURIComponent(result.message.name);
+            return;
+        }
+
+        toast("Farm visit booked successfully.");
+        await load();
+        state.view = "farm";
+        render();
+    }
+
+    function showPostForm() {
+        root.innerHTML = `
+            ${header("Create Farm Post")}
+
+            <div class="dairy-section">
+                <div class="card">
+
+                    <div class="form-row">
+                        <label>Post</label>
+
+                        <textarea
+                            id="post-content"
+                            rows="6"
+                            placeholder="Share your farm experience..."
+                        ></textarea>
+                    </div>
+
+                    <div class="form-row">
+                        <label>Photo URL</label>
+
+                        <input
+                            id="post-image"
+                            placeholder="Photo URL"
+                        >
+                    </div>
+
+                    <button
+                        class="btn btn-primary"
+                        onclick="createPost()"
+                    >
+                        Post
+                    </button>
+
+                </div>
+            </div>
+
+            ${nav("")}
+        `;
+    }
+
+    async function createPost() {
+        const content =
+            document.getElementById("post-content")?.value;
+
+        const image =
+            document.getElementById("post-image")?.value;
+
+        if (!content?.trim()) {
+            toast("Please enter post content.");
+            return;
+        }
+
+        await api("create_farm_post", {
+            content,
+            cover_image: image
+        });
+
+        await load();
+
+        state.view = "farm";
+        render();
+    }
+
+    async function likePost(post) {
+        await api("like_post", { post });
+        await load();
+
+        state.view = "farm";
+        render();
+    }
+
+    async function commentPost(post) {
+        const comment = window.prompt("Write your comment");
+
+        if (!comment?.trim()) return;
+
+        await api("add_comment", {
+            post,
+            comment
+        });
+
+        await load();
+
+        state.view = "farm";
+        render();
+    }
+
+    async function toggleOrder(order, action) {
+        await api("pause_resume_order", {
+            order,
+            action
+        });
+
+        await load();
+        state.view = "orders";
+        render();
+
+        toast(
+            action === "pause"
+                ? "Order paused."
+                : "Order resumed."
+        );
+    }
+
+    function addItems(order) {
+        state.view = "products";
+        render();
+
+        toast("Select products to add to this order.");
+    }
+
+    function openCategory(category) {
+        state.category = category;
+        state.view = "products";
+        render();
+    }
+
+    function filterProducts() {
+        render();
+    }
+
+    function setOrderTab(tab) {
+        state.orderTab = tab;
+        render();
+    }
+
+    function addToCart(productName) {
+        const product = state.products.find(
+            (item) => item.name === productName
+        );
+
+        if (!product) {
+            toast("Product not found.");
+            return;
+        }
+
+        const existing = state.cart.find(
+            (item) => item.name === productName
+        );
+
+        if (existing) {
+            existing.qty += 1;
+        } else {
+            state.cart.push({
+                name: product.name,
+                item_name: product.item_name || product.name,
+                price: Number(product.standard_rate || 0),
+                qty: 1
+            });
+        }
+
+        toast(`${product.item_name || product.name} added to cart.`);
+
+        render();
+    }
+
+    function showCart() {
+        const total = state.cart.reduce(
+            (sum, item) => sum + item.price * item.qty,
+            0
+        );
+
+        root.innerHTML = `
+            ${header("Cart", "Review your selected products")}
+
+            <div class="dairy-section">
+                ${
+                    state.cart.map((item) => `
+                        <div class="card">
+                            <div style="
+                                display:flex;
+                                justify-content:space-between;
+                            ">
+                                <div>
+                                    <b>${esc(item.item_name)}</b>
+
+                                    <div class="dairy-sub">
+                                        ${money(item.price)} × ${item.qty}
+                                    </div>
+                                </div>
+
+                                <b>
+                                    ${money(item.price * item.qty)}
+                                </b>
+                            </div>
+
+                            <div style="
+                                display:flex;
+                                gap:6px;
+                                margin-top:10px;
+                            ">
+                                <button
+                                    class="btn btn-light"
+                                    onclick="changeCartQty(
+                                        '${esc(item.name)}',
+                                        -1
+                                    )"
+                                >
+                                    −
+                                </button>
+
+                                <button
+                                    class="btn btn-light"
+                                    onclick="changeCartQty(
+                                        '${esc(item.name)}',
+                                        1
+                                    )"
+                                >
+                                    +
+                                </button>
+                            </div>
+                        </div>
+                    `).join("") ||
+                    empty("Your cart is empty")
+                }
+
+                ${
+                    state.cart.length
+                        ? `
+                            <div class="card">
+                                <b>Total</b>
+
+                                <div class="price">
+                                    ${money(total)}
+                                </div>
+
+                                <p class="dairy-sub">
+                                    Checkout/order creation will be
+                                    connected to the ERPNext order
+                                    workflow next.
+                                </p>
+
+                                <button
+                                    class="btn btn-primary"
+                                    onclick="toast(
+                                        'Order checkout is not connected yet.'
+                                    )"
+                                >
+                                    Continue
+                                </button>
+                            </div>
+                        `
+                        : ""
+                }
+            </div>
+
+            ${nav("products")}
+        `;
+    }
+
+    function changeCartQty(productName, change) {
+        const item = state.cart.find(
+            (cartItem) => cartItem.name === productName
+        );
+
+        if (!item) return;
+
+        item.qty += change;
+
+        if (item.qty <= 0) {
+            state.cart = state.cart.filter(
+                (cartItem) => cartItem.name !== productName
+            );
+        }
+
+        showCart();
+    }
+
+    function addMoney() {
+        toast(
+            "Payment gateway is not connected yet."
+        );
+    }
+
+    async function showInvoices() {
+        const result = await api("invoices");
+
+        root.innerHTML = `
+            ${header("Invoices", "Your billing history")}
+
+            <div class="dairy-section">
+                ${
+                    (result.message || []).map((invoice) => `
+                        <div class="card">
+                            <b>${esc(invoice.name)}</b>
+
+                            <div>
+                                ${esc(invoice.posting_date)}
+                            </div>
+
+                            <div class="price">
+                                ${money(invoice.grand_total)}
+                            </div>
+
+                            <div class="dairy-sub">
+                                ${esc(invoice.status)}
+                            </div>
+                        </div>
+                    `).join("") ||
+                    empty("No invoices")
+                }
+            </div>
+
+            ${nav("account")}
+        `;
+
+        bind();
+    }
+
+    function showFarm() {
+        state.view = "farm";
+        render();
+    }
+
+    async function load() {
+        const [
+            products,
+            offers,
+            upcoming,
+            delivered,
+            wallet,
+            posts
+        ] = await Promise.all([
+            api("products"),
+            api("offers"),
+            api("upcoming_orders"),
+            api("delivered_orders"),
+            api("wallet"),
+            api("farm_posts")
+        ]);
+
+        state.products = products.message || [];
+        state.offers = offers.message || [];
+        state.upcoming = upcoming.message || [];
+        state.delivered = delivered.message || [];
+        state.wallet = wallet.message?.balance || 0;
+        state.posts = posts.message || [];
+
+        render();
+    }
+
+    function render() {
+        if (!root) {
+            console.error("Dairy root element not found.");
+            return;
+        }
+
+        if (state.view === "home") {
+            root.innerHTML = home();
+        } else if (state.view === "products") {
+            root.innerHTML = products();
+        } else if (state.view === "orders") {
+            root.innerHTML = orders();
+        } else if (state.view === "offers") {
+            root.innerHTML = offers();
+        } else if (state.view === "farm") {
+            root.innerHTML = farm();
+        } else if (state.view === "account") {
+            root.innerHTML = account();
+        }
+
+        bind();
+    }
+
+    window.openCategory = openCategory;
+    window.filterProducts = filterProducts;
+    window.setOrderTab = setOrderTab;
+    window.addToCart = addToCart;
+    window.showCart = showCart;
+    window.changeCartQty = changeCartQty;
+    window.toggleOrder = toggleOrder;
+    window.addItems = addItems;
+    window.addMoney = addMoney;
+    window.showInvoices = showInvoices;
+    window.showFarm = showFarm;
+    window.showBooking = showBooking;
+    window.submitVisit = submitVisit;
+    window.showPostForm = showPostForm;
+    window.createPost = createPost;
+    window.likePost = likePost;
+    window.commentPost = commentPost;
+
+    load();
+})();

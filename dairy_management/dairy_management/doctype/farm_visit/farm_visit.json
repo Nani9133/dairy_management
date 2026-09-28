@@ -1,0 +1,69 @@
+{
+  "doctype": "DocType",
+  "name": "Farm Visit",
+  "module": "Dairy Management",
+  "custom": 1,
+  "engine": "InnoDB",
+  "track_changes": 1,
+  "fields": [
+    {
+      "fieldname": "customer",
+      "label": "Customer",
+      "fieldtype": "Link",
+      "options": "Customer",
+      "reqd": 1
+    },
+    {
+      "fieldname": "visit_date",
+      "label": "Visit Date",
+      "fieldtype": "Date",
+      "reqd": 1
+    },
+    {
+      "fieldname": "guests",
+      "label": "Guests",
+      "fieldtype": "Int",
+      "reqd": 1
+    },
+    {
+      "fieldname": "fee_per_guest",
+      "label": "Fee per Guest",
+      "fieldtype": "Currency"
+    },
+    {
+      "fieldname": "total_amount",
+      "label": "Total Amount",
+      "fieldtype": "Currency"
+    },
+    {
+      "fieldname": "payment_status",
+      "label": "Payment Status",
+      "fieldtype": "Select",
+      "options": "Pending\nPaid\nRefunded",
+      "default": "Pending"
+    },
+    {
+      "fieldname": "status",
+      "label": "Status",
+      "fieldtype": "Select",
+      "options": "Pending Payment\nConfirmed\nCompleted\nCancelled",
+      "default": "Pending Payment"
+    },
+    {
+      "fieldname": "special_request",
+      "label": "Special Request",
+      "fieldtype": "Small Text"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "report": 1,
+      "export": 1
+    }
+  ]
+}

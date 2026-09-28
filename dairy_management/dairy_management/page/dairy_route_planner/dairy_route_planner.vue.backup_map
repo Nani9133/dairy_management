@@ -1,0 +1,322 @@
+<script setup>
+import { onMounted, ref } from "vue";
+import { useHost } from "@framework/ui/island";
+
+const emit = defineEmits(["title", "actions"]);
+const host = useHost();
+
+const title = "Route Planner";
+
+const states = ref([]);
+const cities = ref([]);
+const zones = ref([]);
+const areas = ref([]);
+const points = ref([]);
+const routes = ref([]);
+
+const selectedState = ref("");
+const selectedCity = ref("");
+const selectedZone = ref("");
+const selectedArea = ref("");
+const selectedPoint = ref("");
+const selectedRoute = ref("");
+
+const loading = ref(false);
+const errorMessage = ref("");
+
+async function loadFilters() {
+    loading.value = true;
+    errorMessage.value = "";
+
+    try {
+        const response = await frappe.call({
+            method: "dairy_management.api.route_planner_filters",
+            args: {
+                state: selectedState.value || null,
+                city: selectedCity.value || null,
+                zone: selectedZone.value || null,
+                area: selectedArea.value || null,
+                point: selectedPoint.value || null,
+            },
+        });
+
+        const data = response.message || {};
+
+        cities.value = data.cities || [];
+        zones.value = data.zones || [];
+        areas.value = data.areas || [];
+        points.value = data.points || [];
+        routes.value = data.routes || [];
+    } catch (error) {
+        console.error(error);
+        errorMessage.value = "Unable to load Route Planner filters.";
+    } finally {
+        loading.value = false;
+    }
+}
+
+async function loadStates() {
+    states.value = await frappe.db.get_list("State", {
+        filters: {
+            status: "Active",
+        },
+        fields: ["name", "state_name"],
+        order_by: "state_name asc",
+        limit: 100,
+    });
+}
+
+async function stateChanged() {
+    selectedCity.value = "";
+    selectedZone.value = "";
+    selectedArea.value = "";
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    zones.value = [];
+    areas.value = [];
+    points.value = [];
+    routes.value = [];
+
+    await loadFilters();
+}
+
+async function cityChanged() {
+    selectedZone.value = "";
+    selectedArea.value = "";
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    areas.value = [];
+    points.value = [];
+    routes.value = [];
+
+    await loadFilters();
+}
+
+async function zoneChanged() {
+    selectedArea.value = "";
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    points.value = [];
+    routes.value = [];
+
+    await loadFilters();
+}
+
+async function areaChanged() {
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    routes.value = [];
+
+    await loadFilters();
+}
+
+async function pointChanged() {
+    selectedRoute.value = "";
+
+    await loadFilters();
+}
+
+onMounted(async () => {
+    emit("title", title);
+    emit("actions", []);
+
+    await loadStates();
+    await loadFilters();
+});
+</script>
+
+<template>
+    <div class="h-full overflow-y-auto p-5">
+        <div class="mb-5">
+            <h1 class="text-lg font-semibold text-ink-gray-9">
+                Route Planner
+            </h1>
+
+            <p class="mt-1 text-sm text-ink-gray-6">
+                Select the delivery geography to plan routes.
+            </p>
+        </div>
+
+        <div
+            class="grid grid-cols-1 gap-3 rounded-lg border border-outline-gray-2 bg-surface-white p-4 md:grid-cols-3 xl:grid-cols-6"
+        >
+            <!-- State -->
+            <div>
+                <label class="mb-1 block text-xs font-medium text-ink-gray-7">
+                    State
+                </label>
+
+                <select
+                    v-model="selectedState"
+                    @change="stateChanged"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">Select State</option>
+
+                    <option
+                        v-for="state in states"
+                        :key="state.name"
+                        :value="state.name"
+                    >
+                        {{ state.state_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- City -->
+            <div>
+                <label class="mb-1 block text-xs font-medium text-ink-gray-7">
+                    City
+                </label>
+
+                <select
+                    v-model="selectedCity"
+                    @change="cityChanged"
+                    :disabled="!selectedState || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">Select City</option>
+
+                    <option
+                        v-for="city in cities"
+                        :key="city.name"
+                        :value="city.name"
+                    >
+                        {{ city.city_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- Zone -->
+            <div>
+                <label class="mb-1 block text-xs font-medium text-ink-gray-7">
+                    Zone
+                </label>
+
+                <select
+                    v-model="selectedZone"
+                    @change="zoneChanged"
+                    :disabled="!selectedCity || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">Select Zone</option>
+
+                    <option
+                        v-for="zone in zones"
+                        :key="zone.name"
+                        :value="zone.name"
+                    >
+                        {{ zone.zone_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- Area -->
+            <div>
+                <label class="mb-1 block text-xs font-medium text-ink-gray-7">
+                    Area
+                </label>
+
+                <select
+                    v-model="selectedArea"
+                    @change="areaChanged"
+                    :disabled="!selectedZone || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">Select Area</option>
+
+                    <option
+                        v-for="area in areas"
+                        :key="area.name"
+                        :value="area.name"
+                    >
+                        {{ area.area_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- point -->
+            <div>
+                <label class="mb-1 block text-xs font-medium text-ink-gray-7">
+                    point
+                </label>
+
+                <select
+                    v-model="selectedPoint"
+                    @change="pointChanged"
+                    :disabled="!selectedArea || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">Select point</option>
+
+                    <option
+                        v-for="point in points"
+                        :key="point.name"
+                        :value="point.name"
+                    >
+                        {{ point.point_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- Route -->
+            <div>
+                <label class="mb-1 block text-xs font-medium text-ink-gray-7">
+                    Route
+                </label>
+
+                <select
+                    v-model="selectedRoute"
+                    :disabled="!selectedPoint || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">Select Route</option>
+
+                    <option
+                        v-for="route in routes"
+                        :key="route.name"
+                        :value="route.name"
+                    >
+                        {{ route.route_name }}
+                    </option>
+                </select>
+            </div>
+        </div>
+
+        <div
+            v-if="errorMessage"
+            class="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+        >
+            {{ errorMessage }}
+        </div>
+
+        <div
+            v-if="loading"
+            class="mt-4 text-sm text-ink-gray-6"
+        >
+            Loading...
+        </div>
+
+        <div
+            v-if="selectedState && selectedCity"
+            class="mt-5 rounded-lg border border-outline-gray-2 bg-surface-white p-4"
+        >
+            <div class="text-sm font-medium text-ink-gray-8">
+                Selected Geography
+            </div>
+
+            <div class="mt-2 text-sm text-ink-gray-6">
+                {{ selectedState }}
+                <span v-if="selectedCity"> → {{ selectedCity }}</span>
+                <span v-if="selectedZone"> → {{ selectedZone }}</span>
+                <span v-if="selectedArea"> → {{ selectedArea }}</span>
+                <span v-if="selectedPoint"> → {{ selectedPoint }}</span>
+                <span v-if="selectedRoute"> → {{ selectedRoute }}</span>
+            </div>
+        </div>
+    </div>
+</template>

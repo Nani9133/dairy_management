@@ -1,0 +1,942 @@
+<script setup>
+import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { useHost } from "@framework/ui/island";
+import { Map, NavigationControl, Marker, Popup, LngLatBounds } from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
+
+const emit = defineEmits(["title", "actions"]);
+const host = useHost();
+
+const title = "Route Planner";
+
+/* =========================================================
+   FILTER DATA
+========================================================= */
+
+const states = ref([]);
+const cities = ref([]);
+const zones = ref([]);
+const areas = ref([]);
+const points = ref([]);
+const routes = ref([]);
+
+/* =========================================================
+   SELECTED FILTERS
+========================================================= */
+
+const selectedState = ref("");
+const selectedCity = ref("");
+const selectedZone = ref("");
+const selectedArea = ref("");
+const selectedPoint = ref("");
+const selectedRoute = ref("");
+
+/* =========================================================
+   PAGE STATE
+========================================================= */
+
+const loading = ref(false);
+const errorMessage = ref("");
+
+const customers = ref([]);
+const customerCount = ref(0);
+
+/* =========================================================
+   MAP STATE
+========================================================= */
+
+const mapContainer = ref(null);
+const mapInstance = ref(null);
+const customerMarkers = ref([]);
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function getFieldValue(row, field, fallback = "") {
+    return row && row[field] !== undefined && row[field] !== null
+        ? row[field]
+        : fallback;
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+function selectedName(list, value, field) {
+    const item = list.find(row => row.name === value);
+    return item ? item[field] : value;
+}
+
+/* =========================================================
+   LOAD FILTERS
+========================================================= */
+
+async function loadFilters(params = {}) {
+    const response = await frappe.call({
+        method: "dairy_management.api.route_planner_filters",
+        args: params
+    });
+
+    const data = response.message || {};
+
+    cities.value = data.cities || [];
+    zones.value = data.zones || [];
+    areas.value = data.areas || [];
+    points.value = data.points || [];
+    routes.value = data.routes || [];
+}
+
+/* =========================================================
+   LOAD STATES
+========================================================= */
+
+async function loadStates() {
+    const response = await frappe.call({
+        method: "frappe.client.get_list",
+        args: {
+            doctype: "State",
+            fields: ["name", "state_name", "state_code"],
+            filters: {
+                status: "Active"
+            },
+            order_by: "state_name asc",
+            limit_page_length: 1000
+        }
+    });
+
+    states.value = response.message || [];
+}
+
+/* =========================================================
+   FILTER CHANGE EVENTS
+========================================================= */
+
+async function stateChanged() {
+    selectedCity.value = "";
+    selectedZone.value = "";
+    selectedArea.value = "";
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    cities.value = [];
+    zones.value = [];
+    areas.value = [];
+    points.value = [];
+    routes.value = [];
+
+    clearCustomerMap();
+
+    await loadFilters({
+        state: selectedState.value
+    });
+}
+
+async function cityChanged() {
+    selectedZone.value = "";
+    selectedArea.value = "";
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    zones.value = [];
+    areas.value = [];
+    points.value = [];
+    routes.value = [];
+
+    clearCustomerMap();
+
+    await loadFilters({
+        state: selectedState.value,
+        city: selectedCity.value
+    });
+}
+
+async function zoneChanged() {
+    selectedArea.value = "";
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    areas.value = [];
+    points.value = [];
+    routes.value = [];
+
+    clearCustomerMap();
+
+    await loadFilters({
+        state: selectedState.value,
+        city: selectedCity.value,
+        zone: selectedZone.value
+    });
+}
+
+async function areaChanged() {
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    points.value = [];
+    routes.value = [];
+
+    clearCustomerMap();
+
+    await loadFilters({
+        state: selectedState.value,
+        city: selectedCity.value,
+        zone: selectedZone.value,
+        area: selectedArea.value
+    });
+}
+
+async function pointChanged() {
+    selectedRoute.value = "";
+
+    routes.value = [];
+
+    clearCustomerMap();
+
+    await loadFilters({
+        state: selectedState.value,
+        city: selectedCity.value,
+        zone: selectedZone.value,
+        area: selectedArea.value,
+        point: selectedPoint.value
+    });
+}
+
+async function routeChanged() {
+    clearCustomerMap();
+
+    if (!selectedRoute.value) {
+        customers.value = [];
+        customerCount.value = 0;
+        return;
+    }
+
+    await loadRouteCustomers();
+}
+
+/* =========================================================
+   LOAD CUSTOMERS
+========================================================= */
+
+async function loadRouteCustomers() {
+    loading.value = true;
+    errorMessage.value = "";
+
+    try {
+        const response = await frappe.call({
+            method: "dairy_management.api.route_planner_customers",
+            args: {
+                state: selectedState.value,
+                city: selectedCity.value,
+                zone: selectedZone.value,
+                area: selectedArea.value,
+                point: selectedPoint.value,
+                route: selectedRoute.value
+            }
+        });
+
+        const data = response.message || {};
+
+        customers.value = data.customers || [];
+        customerCount.value = data.count || customers.value.length;
+
+        await nextTick();
+
+        initializeCustomerMap();
+    } catch (error) {
+        console.error(error);
+
+        customers.value = [];
+        customerCount.value = 0;
+        errorMessage.value = "Unable to load customers.";
+    } finally {
+        loading.value = false;
+    }
+}
+
+/* =========================================================
+   MAP STYLE
+   OpenStreetMap raster tiles displayed through MapLibre
+========================================================= */
+
+function createMapStyle() {
+    return {
+        version: 8,
+
+        sources: {
+            osm: {
+                type: "raster",
+                tiles: [
+                    "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+                ],
+                tileSize: 256,
+                attribution:
+                    "© OpenStreetMap contributors"
+            }
+        },
+
+        layers: [
+            {
+                id: "osm",
+                type: "raster",
+                source: "osm"
+            }
+        ]
+    };
+}
+
+/* =========================================================
+   INITIALIZE MAP
+========================================================= */
+
+function initializeCustomerMap() {
+    if (!mapContainer.value) {
+        return;
+    }
+
+    clearCustomerMap();
+
+    if (!customers.value.length) {
+        return;
+    }
+
+    const validCustomers = customers.value.filter(customer => {
+        const lat = Number(customer.latitude);
+        const lon = Number(customer.longitude);
+
+        return (
+            Number.isFinite(lat) &&
+            Number.isFinite(lon) &&
+            lat !== 0 &&
+            lon !== 0
+        );
+    });
+
+    if (!validCustomers.length) {
+        errorMessage.value = "No customers have valid GPS coordinates.";
+        return;
+    }
+
+    const firstCustomer = validCustomers[0];
+
+    mapInstance.value = new Map({
+        container: mapContainer.value,
+        style: createMapStyle(),
+        center: [
+            Number(firstCustomer.longitude),
+            Number(firstCustomer.latitude)
+        ],
+        zoom: 14
+    });
+
+    mapInstance.value.addControl(
+        new NavigationControl(),
+        "top-right"
+    );
+
+    mapInstance.value.on("load", () => {
+        const bounds = new LngLatBounds();
+
+        validCustomers.forEach(customer => {
+            const latitude = Number(customer.latitude);
+            const longitude = Number(customer.longitude);
+
+            bounds.extend([longitude, latitude]);
+
+            const markerElement = document.createElement("div");
+
+            markerElement.className = "customer-marker";
+
+            markerElement.innerHTML = `
+                <div class="customer-marker-dot"></div>
+            `;
+
+            const popupHtml = `
+                <div class="customer-popup">
+                    <div class="customer-popup-title">
+                        ${escapeHtml(customer.customer_name)}
+                    </div>
+
+                    <div class="customer-popup-row">
+                        <b>ID:</b>
+                        ${escapeHtml(customer.name)}
+                    </div>
+
+                    <div class="customer-popup-row">
+                        <b>Route:</b>
+                        ${escapeHtml(customer.route)}
+                    </div>
+
+                    <div class="customer-popup-row">
+                        <b>Point:</b>
+                        ${escapeHtml(customer.pickpoint__warehouse)}
+                    </div>
+
+                    <div class="customer-popup-row">
+                        <b>GPS:</b>
+                        ${latitude.toFixed(6)},
+                        ${longitude.toFixed(6)}
+                    </div>
+                </div>
+            `;
+
+            const popup = new Popup({
+                offset: 18,
+                closeButton: true,
+                closeOnClick: true
+            }).setHTML(popupHtml);
+
+            const marker = new Marker({
+                element: markerElement
+            })
+                .setLngLat([longitude, latitude])
+                .setPopup(popup)
+                .addTo(mapInstance.value);
+
+            customerMarkers.value.push(marker);
+        });
+
+        if (!bounds.isEmpty()) {
+            mapInstance.value.fitBounds(bounds, {
+                padding: 60,
+                maxZoom: 17,
+                duration: 800
+            });
+        }
+    });
+}
+
+/* =========================================================
+   CLEAR MAP
+========================================================= */
+
+function clearCustomerMap() {
+    customerMarkers.value.forEach(marker => {
+        try {
+            marker.remove();
+        } catch (e) {
+            console.warn("Unable to remove marker", e);
+        }
+    });
+
+    customerMarkers.value = [];
+
+    if (mapInstance.value) {
+        try {
+            mapInstance.value.remove();
+        } catch (e) {
+            console.warn("Unable to remove map", e);
+        }
+
+        mapInstance.value = null;
+    }
+}
+
+/* =========================================================
+   LIFECYCLE
+========================================================= */
+
+onMounted(async () => {
+    emit("title", title);
+
+    try {
+        await loadStates();
+        await loadFilters();
+    } catch (error) {
+        console.error(error);
+        errorMessage.value = "Unable to load route planner filters.";
+    }
+});
+
+onBeforeUnmount(() => {
+    clearCustomerMap();
+});
+</script>
+
+<template>
+    <div class="route-planner">
+
+        <!-- HEADER -->
+
+        <div class="page-header">
+            <div>
+                <h1>Route Planner</h1>
+                <p>
+                    Plan and manage customer routes using GPS locations.
+                </p>
+            </div>
+
+            <div class="customer-count">
+                <span class="count-label">Customers</span>
+                <span class="count-value">{{ customerCount }}</span>
+            </div>
+        </div>
+
+        <!-- FILTERS -->
+
+        <div class="filter-card">
+
+            <div class="filter-grid">
+
+                <div class="filter-field">
+                    <label>State</label>
+
+                    <select
+                        v-model="selectedState"
+                        @change="stateChanged"
+                    >
+                        <option value="">Select State</option>
+
+                        <option
+                            v-for="state in states"
+                            :key="state.name"
+                            :value="state.name"
+                        >
+                            {{ state.state_name }}
+                        </option>
+                    </select>
+                </div>
+
+                <div class="filter-field">
+                    <label>City</label>
+
+                    <select
+                        v-model="selectedCity"
+                        @change="cityChanged"
+                        :disabled="!selectedState"
+                    >
+                        <option value="">Select City</option>
+
+                        <option
+                            v-for="city in cities"
+                            :key="city.name"
+                            :value="city.name"
+                        >
+                            {{ city.city_name }}
+                        </option>
+                    </select>
+                </div>
+
+                <div class="filter-field">
+                    <label>Zone</label>
+
+                    <select
+                        v-model="selectedZone"
+                        @change="zoneChanged"
+                        :disabled="!selectedCity"
+                    >
+                        <option value="">Select Zone</option>
+
+                        <option
+                            v-for="zone in zones"
+                            :key="zone.name"
+                            :value="zone.name"
+                        >
+                            {{ zone.zone_name }}
+                        </option>
+                    </select>
+                </div>
+
+                <div class="filter-field">
+                    <label>Area</label>
+
+                    <select
+                        v-model="selectedArea"
+                        @change="areaChanged"
+                        :disabled="!selectedZone"
+                    >
+                        <option value="">Select Area</option>
+
+                        <option
+                            v-for="area in areas"
+                            :key="area.name"
+                            :value="area.name"
+                        >
+                            {{ area.area_name }}
+                        </option>
+                    </select>
+                </div>
+
+                <div class="filter-field">
+                    <label>Point</label>
+
+                    <select
+                        v-model="selectedPoint"
+                        @change="pointChanged"
+                        :disabled="!selectedArea"
+                    >
+                        <option value="">Select Point</option>
+
+                        <option
+                            v-for="point in points"
+                            :key="point.name"
+                            :value="point.name"
+                        >
+                            {{ point.point_name }}
+                        </option>
+                    </select>
+                </div>
+
+                <div class="filter-field">
+                    <label>Route</label>
+
+                    <select
+                        v-model="selectedRoute"
+                        @change="routeChanged"
+                        :disabled="!selectedPoint"
+                    >
+                        <option value="">Select Route</option>
+
+                        <option
+                            v-for="route in routes"
+                            :key="route.name"
+                            :value="route.name"
+                        >
+                            {{ route.route_name }}
+                        </option>
+                    </select>
+                </div>
+
+            </div>
+        </div>
+
+        <!-- SELECTED GEOGRAPHY -->
+
+        <div
+            v-if="
+                selectedState ||
+                selectedCity ||
+                selectedZone ||
+                selectedArea ||
+                selectedPoint ||
+                selectedRoute
+            "
+            class="selection-card"
+        >
+            <div class="selection-title">
+                Selected Geography
+            </div>
+
+            <div class="selection-path">
+
+                <span v-if="selectedState">
+                    {{ selectedName(states, selectedState, "state_name") }}
+                </span>
+
+                <span v-if="selectedCity">
+                    →
+                    {{ selectedName(cities, selectedCity, "city_name") }}
+                </span>
+
+                <span v-if="selectedZone">
+                    →
+                    {{ selectedName(zones, selectedZone, "zone_name") }}
+                </span>
+
+                <span v-if="selectedArea">
+                    →
+                    {{ selectedName(areas, selectedArea, "area_name") }}
+                </span>
+
+                <span v-if="selectedPoint">
+                    →
+                    {{ selectedName(points, selectedPoint, "point_name") }}
+                </span>
+
+                <span v-if="selectedRoute">
+                    →
+                    {{ selectedName(routes, selectedRoute, "route_name") }}
+                </span>
+
+            </div>
+        </div>
+
+        <!-- STATUS -->
+
+        <div v-if="loading" class="status-card">
+            Loading customers...
+        </div>
+
+        <div v-if="errorMessage" class="error-card">
+            {{ errorMessage }}
+        </div>
+
+        <!-- MAP -->
+
+        <div class="map-card">
+
+            <div class="map-header">
+
+                <div>
+                    <h2>Customer Locations</h2>
+
+                    <p>
+                        {{
+                            selectedRoute
+                                ? "Customers assigned to the selected route"
+                                : "Select a route to display customers"
+                        }}
+                    </p>
+                </div>
+
+                <div
+                    v-if="selectedRoute"
+                    class="route-badge"
+                >
+                    {{ selectedName(routes, selectedRoute, "route_name") }}
+                </div>
+
+            </div>
+
+            <div
+                ref="mapContainer"
+                class="customer-map"
+            ></div>
+
+            <div
+                v-if="!selectedRoute && !loading"
+                class="map-empty"
+            >
+                Select a Route to display customer locations.
+            </div>
+
+            <div
+                v-if="selectedRoute && !customers.length && !loading"
+                class="map-empty"
+            >
+                No customers found for this route.
+            </div>
+
+        </div>
+
+    </div>
+</template>
+
+<style scoped>
+.route-planner {
+    padding: 24px;
+    background: #f8f9fa;
+    min-height: 100vh;
+}
+
+.page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 28px;
+    font-weight: 700;
+}
+
+.page-header p {
+    margin: 5px 0 0;
+    color: #6b7280;
+}
+
+.customer-count {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 10px 18px;
+    text-align: center;
+}
+
+.count-label {
+    display: block;
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.count-value {
+    display: block;
+    font-size: 24px;
+    font-weight: 700;
+}
+
+.filter-card {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+}
+
+.filter-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.filter-field label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.filter-field select {
+    width: 100%;
+    height: 40px;
+    border: 1px solid #d1d5db;
+    border-radius: 7px;
+    padding: 0 10px;
+    background: white;
+}
+
+.filter-field select:disabled {
+    background: #f3f4f6;
+    color: #9ca3af;
+}
+
+.selection-card {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+}
+
+.selection-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #6b7280;
+    margin-bottom: 6px;
+}
+
+.selection-path {
+    font-weight: 600;
+    font-size: 15px;
+}
+
+.status-card,
+.error-card {
+    background: white;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+}
+
+.error-card {
+    border: 1px solid #fecaca;
+    color: #b91c1c;
+    background: #fef2f2;
+}
+
+.map-card {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.map-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 20px;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.map-header h2 {
+    margin: 0;
+    font-size: 18px;
+}
+
+.map-header p {
+    margin: 4px 0 0;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+.route-badge {
+    background: #f3f4f6;
+    border-radius: 999px;
+    padding: 7px 12px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.customer-map {
+    width: 100%;
+    height: 600px;
+    background: #e5e7eb;
+}
+
+.map-empty {
+    height: 600px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #6b7280;
+    background: #f3f4f6;
+}
+
+:global(.customer-marker) {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+:global(.customer-marker-dot) {
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    background: #2563eb;
+    border: 3px solid white;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.customer-popup {
+    min-width: 210px;
+    font-size: 13px;
+}
+
+.customer-popup-title {
+    font-weight: 700;
+    font-size: 15px;
+    margin-bottom: 9px;
+}
+
+.customer-popup-row {
+    margin: 4px 0;
+}
+
+@media (max-width: 1200px) {
+    .filter-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 700px) {
+    .route-planner {
+        padding: 12px;
+    }
+
+    .filter-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .page-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+    }
+
+    .customer-map,
+    .map-empty {
+        height: 500px;
+    }
+}
+</style>

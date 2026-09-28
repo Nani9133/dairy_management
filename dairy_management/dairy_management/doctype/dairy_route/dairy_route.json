@@ -1,0 +1,71 @@
+{
+  "doctype": "DocType",
+  "name": "Dairy Route",
+  "module": "Dairy Management",
+  "custom": 1,
+  "engine": "InnoDB",
+  "track_changes": 1,
+  "fields": [
+    {
+      "fieldname": "route_name",
+      "label": "Route Name",
+      "fieldtype": "Data",
+      "reqd": 1
+    },
+    {
+      "fieldname": "pickpoint",
+      "label": "Pickpoint / Warehouse",
+      "fieldtype": "Link",
+      "options": "Pickpoint",
+      "reqd": 1
+    },
+    {
+      "fieldname": "area",
+      "label": "Area",
+      "fieldtype": "Link",
+      "options": "Area"
+    },
+    {
+      "fieldname": "zone",
+      "label": "Zone",
+      "fieldtype": "Link",
+      "options": "Zone"
+    },
+    {
+      "fieldname": "city",
+      "label": "City",
+      "fieldtype": "Link",
+      "options": "City"
+    },
+    {
+      "fieldname": "state",
+      "label": "State",
+      "fieldtype": "Link",
+      "options": "State"
+    },
+    {
+      "fieldname": "geofence_json",
+      "label": "Geofence JSON",
+      "fieldtype": "Long Text"
+    },
+    {
+      "fieldname": "status",
+      "label": "Status",
+      "fieldtype": "Select",
+      "options": "Active\nInactive",
+      "default": "Active",
+      "reqd": 1
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "report": 1,
+      "export": 1
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "doctype": "DocType",
+  "name": "Dairy Settings",
+  "module": "Dairy Management",
+  "custom": 1,
+  "engine": "InnoDB",
+  "track_changes": 1,
+  "fields": [
+    {
+      "fieldname": "farm_visit_fee_per_guest",
+      "label": "Farm Visit Fee per Guest",
+      "fieldtype": "Currency",
+      "default": 100,
+      "reqd": 1
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "report": 1,
+      "export": 1
+    }
+  ]
+}

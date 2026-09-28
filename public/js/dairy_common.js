@@ -1,0 +1,1 @@
+window.DairyApp={call:(method,args={})=>frappe.call({method:`dairy_management.api.${method}`,args}),money:v=>new Intl.NumberFormat('en-IN',{style:'currency',currency:'INR',maximumFractionDigits:2}).format(Number(v||0))};

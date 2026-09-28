@@ -1,0 +1,232 @@
+import json, frappe
+from frappe import _
+from frappe.utils import flt,cint,getdate,now_datetime
+
+def customer():
+    u=frappe.session.user
+    c=frappe.db.get_value('Customer',{'custom_user':u},'name') or frappe.db.get_value('Customer',{'email_id':u},'name')
+    if not c: frappe.throw(_('No customer profile is linked to this user.'))
+    return c
+
+@frappe.whitelist(allow_guest=True)
+def health(): return {'ok':True,'service':'dairy_management','time':str(now_datetime())}
+
+@frappe.whitelist()
+def products(search=None):
+    filters={'disabled':0}
+    if search: filters['item_name']=['like',f'%{search}%']
+    return frappe.get_all('Item',filters=filters,fields=['name','item_name','description','stock_uom','image','standard_rate'],order_by='item_name asc',limit_page_length=100)
+
+@frappe.whitelist()
+def offers():
+    return frappe.get_all('Dairy Offer',filters={'status':'Active'},fields=['name','title','offer_type','discount_percentage','discount_amount','offer_price','valid_from','valid_to','banner_image','description'],order_by='priority asc,modified desc',limit_page_length=50)
+
+@frappe.whitelist()
+def wallet():
+    c=customer(); return {'customer':c,'balance':flt(frappe.db.get_value('Customer',c,'custom_wallet_balance') or 0)}
+
+@frappe.whitelist()
+def upcoming_orders():
+    return frappe.get_all('Dairy Order View',filters={'customer':customer(),'status':['in',['Upcoming','Paused']]},fields='*',order_by='delivery_date asc',limit_page_length=100)
+
+@frappe.whitelist()
+def delivered_orders():
+    return frappe.get_all('Dairy Order View',filters={'customer':customer(),'status':'Delivered'},fields='*',order_by='delivery_date desc',limit_page_length=100)
+
+@frappe.whitelist()
+def pause_resume_order(order,action):
+    d=frappe.get_doc('Dairy Order View',order)
+    if d.customer!=customer(): frappe.throw(_('Not permitted'))
+    d.status='Paused' if action=='pause' else 'Upcoming' if action=='resume' else d.status
+    d.save(ignore_permissions=True); return d.as_dict()
+
+@frappe.whitelist()
+def invoices():
+    return frappe.get_all('Sales Invoice',filters={'customer':customer(),'docstatus':1},fields=['name','posting_date','grand_total','outstanding_amount','status'],order_by='posting_date desc',limit_page_length=100)
+
+@frappe.whitelist()
+def farm_posts():
+    return frappe.get_all('Farm Post',filters={'status':'Published'},fields=['name','author','content','cover_image','like_count','comment_count','creation'],order_by='creation desc',limit_page_length=100)
+
+@frappe.whitelist()
+def like_post(post):
+    u=frappe.session.user; old=frappe.db.exists('Farm Post Like',{'post':post,'user':u}); d=frappe.get_doc('Farm Post',post)
+    if old: frappe.delete_doc('Farm Post Like',old,ignore_permissions=True); d.like_count=max(cint(d.like_count)-1,0); liked=False
+    else: frappe.get_doc({'doctype':'Farm Post Like','post':post,'user':u}).insert(ignore_permissions=True); d.like_count=cint(d.like_count)+1; liked=True
+    d.save(ignore_permissions=True); return {'liked':liked,'like_count':d.like_count}
+
+@frappe.whitelist()
+def add_comment(post,comment):
+    if not comment or not comment.strip(): frappe.throw(_('Comment cannot be empty'))
+    d=frappe.get_doc({'doctype':'Farm Post Comment','post':post,'user':frappe.session.user,'comment':comment.strip()}).insert(ignore_permissions=True)
+    frappe.db.set_value('Farm Post',post,'comment_count',cint(frappe.db.get_value('Farm Post',post,'comment_count') or 0)+1); return d.as_dict()
+
+@frappe.whitelist()
+def create_farm_post(content,cover_image=None):
+    return frappe.get_doc({'doctype':'Farm Post','author':frappe.session.user,'content':content,'cover_image':cover_image,'status':'Published'}).insert(ignore_permissions=True).as_dict()
+
+@frappe.whitelist()
+def book_farm_visit(visit_date,guests,special_request=None):
+    c=customer(); guests=cint(guests)
+    if guests<1: frappe.throw(_('At least one guest is required'))
+    fee=flt(frappe.db.get_single_value('Dairy Settings','farm_visit_fee_per_guest') or 100); total=fee*guests
+    bal=flt(frappe.db.get_value('Customer',c,'custom_wallet_balance') or 0); status='Pending Payment'
+    if bal>=total: frappe.db.set_value('Customer',c,'custom_wallet_balance',bal-total); status='Confirmed'
+    v=frappe.get_doc({'doctype':'Farm Visit','customer':c,'visit_date':getdate(visit_date),'guests':guests,'fee_per_guest':fee,'total_amount':total,'payment_status':'Paid' if status=='Confirmed' else 'Pending','status':status,'special_request':special_request}).insert(ignore_permissions=True)
+    frappe.db.commit(); return {'name':v.name,'status':status,'total_amount':total,'wallet_balance':bal-total if status=='Confirmed' else bal,'payment_required':status!='Confirmed'}
+
+@frappe.whitelist()
+def route_from_location(latitude,longitude):
+    lat,lon=flt(latitude),flt(longitude)
+    for r in frappe.get_all('Dairy Route',filters={'status':'Active'},fields=['name','route_name','geofence_json','pickpoint','area','zone','city','state']):
+        try:
+            if point_in_polygon(lat,lon,json.loads(r.geofence_json or '{}').get('polygon',[])): return r
+        except Exception: pass
+    return None
+
+def point_in_polygon(lat,lon,p):
+    if len(p)<3:return False
+    inside=False;j=len(p)-1
+    for i in range(len(p)):
+        yi,xi=flt(p[i].get('lat')),flt(p[i].get('lng')); yj,xj=flt(p[j].get('lat')),flt(p[j].get('lng'))
+        if ((yi>lat)!=(yj>lat)) and lon<(xj-xi)*(lat-yi)/(yj-yi+1e-12)+xi: inside=not inside
+        j=i
+    return inside
+
+
+
+@frappe.whitelist()
+def route_planner_filters(state=None, city=None, zone=None, area=None, point=None):
+    if state:
+        cities = frappe.get_all(
+            "City",
+            filters={"state": state, "status": "Active"},
+            fields=["name", "city_name"],
+            order_by="city_name asc"
+        )
+    else:
+        cities = frappe.get_all(
+            "City",
+            filters={"status": "Active"},
+            fields=["name", "city_name"],
+            order_by="city_name asc"
+        )
+
+    if city:
+        zones = frappe.get_all(
+            "Zone",
+            filters={"city": city, "status": "Active"},
+            fields=["name", "zone_name"],
+            order_by="zone_name asc"
+        )
+    else:
+        zones = []
+
+    if zone:
+        areas = frappe.get_all(
+            "Area",
+            filters={"zone": zone, "status": "Active"},
+            fields=["name", "area_name"],
+            order_by="area_name asc"
+        )
+    else:
+        areas = []
+
+    if area:
+        points = frappe.get_all(
+            "Point",
+            filters={
+                "area_name": area,
+                "point_status": "Active"
+            },
+            fields=[
+                "name",
+                "point_name",
+                "point_code",
+                "point_type",
+                "latitude",
+                "longitude"
+            ],
+            order_by="point_name asc"
+        )
+    else:
+        points = []
+
+    if point:
+        routes = frappe.get_all(
+            "Route",
+            filters={
+                "point_name": point,
+                "route_status": "Active"
+            },
+            fields=[
+                "name",
+                "route_name",
+                "route_id",
+                "route_type"
+            ],
+            order_by="route_name asc"
+        )
+    else:
+        routes = []
+
+    return {
+        "cities": cities,
+        "zones": zones,
+        "areas": areas,
+        "points": points,
+        "routes": routes
+    }
+
+@frappe.whitelist()
+def route_planner_customers(
+    state=None,
+    city=None,
+    zone=None,
+    area=None,
+    point=None,
+    route=None
+):
+    filters = {}
+
+    if state:
+        filters["state"] = state
+
+    if city:
+        filters["city"] = city
+
+    if zone:
+        filters["zone"] = zone
+
+    if area:
+        filters["area"] = area
+
+    if point:
+        filters["pickpoint__warehouse"] = point
+
+    if route:
+        filters["route"] = route
+
+    customers = frappe.get_all(
+        "Dairy Customer",
+        filters=filters,
+        fields=[
+            "name",
+            "customer_name",
+            "latitude",
+            "longitude",
+            "state",
+            "city",
+            "zone",
+            "area",
+            "pickpoint__warehouse",
+            "route"
+        ],
+        order_by="name asc",
+        limit_page_length=5000
+    )
+
+    return {
+        "count": len(customers),
+        "customers": customers
+    }

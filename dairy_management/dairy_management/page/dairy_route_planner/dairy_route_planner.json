@@ -1,0 +1,20 @@
+{
+ "content": null,
+ "creation": "2026-09-19 11:27:16.415014",
+ "docstatus": 0,
+ "doctype": "Page",
+ "idx": 0,
+ "modified": "2026-09-19 11:27:16.415014",
+ "modified_by": "Administrator",
+ "module": "Dairy Management",
+ "name": "dairy-route-planner",
+ "owner": "Administrator",
+ "page_name": "dairy-route-planner",
+ "roles": [],
+ "script": null,
+ "standard": "Yes",
+ "style": null,
+ "system_page": 0,
+ "title": "Route Planner",
+ "type": "Frappe UI"
+}

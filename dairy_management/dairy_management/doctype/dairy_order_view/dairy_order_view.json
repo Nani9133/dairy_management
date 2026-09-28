@@ -1,0 +1,78 @@
+{
+  "doctype": "DocType",
+  "name": "Dairy Order View",
+  "module": "Dairy Management",
+  "custom": 1,
+  "engine": "InnoDB",
+  "track_changes": 1,
+  "fields": [
+    {
+      "fieldname": "customer",
+      "label": "Customer",
+      "fieldtype": "Link",
+      "options": "Customer",
+      "reqd": 1
+    },
+    {
+      "fieldname": "delivery_date",
+      "label": "Delivery Date",
+      "fieldtype": "Date",
+      "reqd": 1
+    },
+    {
+      "fieldname": "delivery_time",
+      "label": "Delivery Time",
+      "fieldtype": "Time"
+    },
+    {
+      "fieldname": "item_summary",
+      "label": "Item Summary",
+      "fieldtype": "Data"
+    },
+    {
+      "fieldname": "order_total",
+      "label": "Order Total",
+      "fieldtype": "Currency"
+    },
+    {
+      "fieldname": "status",
+      "label": "Status",
+      "fieldtype": "Select",
+      "options": "Upcoming\nPaused\nDelivered\nCancelled",
+      "default": "Upcoming"
+    },
+    {
+      "fieldname": "delivered_at",
+      "label": "Delivered At",
+      "fieldtype": "Datetime"
+    },
+    {
+      "fieldname": "proof_of_delivery",
+      "label": "Proof of Delivery",
+      "fieldtype": "Attach Image"
+    },
+    {
+      "fieldname": "route",
+      "label": "Route",
+      "fieldtype": "Link",
+      "options": "Dairy Route"
+    },
+    {
+      "fieldname": "vehicle",
+      "label": "Vehicle",
+      "fieldtype": "Link",
+      "options": "Vehicle"
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "report": 1,
+      "export": 1
+    }
+  ]
+}

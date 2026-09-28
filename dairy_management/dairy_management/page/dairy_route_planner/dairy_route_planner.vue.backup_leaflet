@@ -1,0 +1,708 @@
+<script setup>
+import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { useHost } from "@framework/ui/island";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
+
+const emit = defineEmits(["title", "actions"]);
+const host = useHost();
+
+const title = "Route Planner";
+
+/* -------------------------------------------------------
+   FILTER DATA
+------------------------------------------------------- */
+
+const states = ref([]);
+const cities = ref([]);
+const zones = ref([]);
+const areas = ref([]);
+const points = ref([]);
+const routes = ref([]);
+
+/* -------------------------------------------------------
+   SELECTED FILTERS
+------------------------------------------------------- */
+
+const selectedState = ref("");
+const selectedCity = ref("");
+const selectedZone = ref("");
+const selectedArea = ref("");
+const selectedPoint = ref("");
+const selectedRoute = ref("");
+
+/* -------------------------------------------------------
+   PAGE STATE
+------------------------------------------------------- */
+
+const loading = ref(false);
+const errorMessage = ref("");
+
+/* -------------------------------------------------------
+   CUSTOMER DATA
+------------------------------------------------------- */
+
+const customers = ref([]);
+const customerCount = ref(0);
+
+/* -------------------------------------------------------
+   MAP
+------------------------------------------------------- */
+
+const mapContainer = ref(null);
+const mapInstance = ref(null);
+const customerMarkers = [];
+
+/* -------------------------------------------------------
+   LOAD FILTERS
+------------------------------------------------------- */
+
+async function loadFilters() {
+    loading.value = true;
+    errorMessage.value = "";
+
+    try {
+        const response = await frappe.call({
+            method: "dairy_management.api.route_planner_filters",
+            args: {
+                state: selectedState.value || null,
+                city: selectedCity.value || null,
+                zone: selectedZone.value || null,
+                area: selectedArea.value || null,
+                point: selectedPoint.value || null,
+            },
+        });
+
+        const data = response.message || {};
+
+        cities.value = data.cities || [];
+        zones.value = data.zones || [];
+        areas.value = data.areas || [];
+        points.value = data.points || [];
+        routes.value = data.routes || [];
+    } catch (error) {
+        console.error(error);
+        errorMessage.value = "Unable to load Route Planner filters.";
+    } finally {
+        loading.value = false;
+    }
+}
+
+/* -------------------------------------------------------
+   LOAD STATES
+------------------------------------------------------- */
+
+async function loadStates() {
+    try {
+        states.value = await frappe.db.get_list("State", {
+            filters: {
+                status: "Active",
+            },
+            fields: ["name", "state_name"],
+            order_by: "state_name asc",
+            limit: 100,
+        });
+    } catch (error) {
+        console.error(error);
+        errorMessage.value = "Unable to load states.";
+    }
+}
+
+/* -------------------------------------------------------
+   STATE CHANGE
+------------------------------------------------------- */
+
+async function stateChanged() {
+    selectedCity.value = "";
+    selectedZone.value = "";
+    selectedArea.value = "";
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    zones.value = [];
+    areas.value = [];
+    points.value = [];
+    routes.value = [];
+
+    clearCustomerMap();
+
+    await loadFilters();
+}
+
+/* -------------------------------------------------------
+   CITY CHANGE
+------------------------------------------------------- */
+
+async function cityChanged() {
+    selectedZone.value = "";
+    selectedArea.value = "";
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    areas.value = [];
+    points.value = [];
+    routes.value = [];
+
+    clearCustomerMap();
+
+    await loadFilters();
+}
+
+/* -------------------------------------------------------
+   ZONE CHANGE
+------------------------------------------------------- */
+
+async function zoneChanged() {
+    selectedArea.value = "";
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    points.value = [];
+    routes.value = [];
+
+    clearCustomerMap();
+
+    await loadFilters();
+}
+
+/* -------------------------------------------------------
+   AREA CHANGE
+------------------------------------------------------- */
+
+async function areaChanged() {
+    selectedPoint.value = "";
+    selectedRoute.value = "";
+
+    routes.value = [];
+
+    clearCustomerMap();
+
+    await loadFilters();
+}
+
+/* -------------------------------------------------------
+   POINT CHANGE
+------------------------------------------------------- */
+
+async function pointChanged() {
+    selectedRoute.value = "";
+
+    clearCustomerMap();
+
+    await loadFilters();
+}
+
+/* -------------------------------------------------------
+   ROUTE CHANGE
+------------------------------------------------------- */
+
+async function routeChanged() {
+    clearCustomerMap();
+
+    if (!selectedRoute.value) {
+        return;
+    }
+
+    await loadRouteCustomers();
+}
+
+/* -------------------------------------------------------
+   LOAD CUSTOMERS FOR SELECTED ROUTE
+------------------------------------------------------- */
+
+async function loadRouteCustomers() {
+    loading.value = true;
+    errorMessage.value = "";
+
+    try {
+        const response = await frappe.call({
+            method: "dairy_management.api.route_planner_customers",
+            args: {
+                state: selectedState.value || null,
+                city: selectedCity.value || null,
+                zone: selectedZone.value || null,
+                area: selectedArea.value || null,
+                point: selectedPoint.value || null,
+                route: selectedRoute.value || null,
+            },
+        });
+
+        const data = response.message || {};
+
+        customers.value = data.customers || [];
+        customerCount.value = data.count || 0;
+
+        await nextTick();
+
+        initializeCustomerMap();
+    } catch (error) {
+        console.error(error);
+        errorMessage.value = "Unable to load customers for this route.";
+    } finally {
+        loading.value = false;
+    }
+}
+
+/* -------------------------------------------------------
+   INITIALIZE MAP
+------------------------------------------------------- */
+
+function initializeCustomerMap() {
+    if (!mapContainer.value) {
+        return;
+    }
+
+    if (mapInstance.value) {
+        mapInstance.value.remove();
+        mapInstance.value = null;
+    }
+
+    mapInstance.value = L.map(mapContainer.value, {
+        zoomControl: true,
+    });
+
+    L.tileLayer(
+        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        {
+            attribution: "&copy; OpenStreetMap contributors",
+            maxZoom: 19,
+        }
+    ).addTo(mapInstance.value);
+
+    const validCustomers = customers.value.filter(
+        (customer) =>
+            customer.latitude !== null &&
+            customer.latitude !== undefined &&
+            customer.longitude !== null &&
+            customer.longitude !== undefined
+    );
+
+    const bounds = [];
+
+    /* ---------------------------------------------------
+       CUSTOMER MARKERS
+    --------------------------------------------------- */
+
+    validCustomers.forEach((customer) => {
+        const latitude = Number(customer.latitude);
+        const longitude = Number(customer.longitude);
+
+        if (
+            Number.isNaN(latitude) ||
+            Number.isNaN(longitude)
+        ) {
+            return;
+        }
+
+        const marker = L.circleMarker(
+            [latitude, longitude],
+            {
+                radius: 6,
+                weight: 2,
+                fillOpacity: 0.8,
+            }
+        );
+
+        marker.bindPopup(`
+            <div style="min-width:220px;">
+                <div style="font-weight:600;font-size:14px;">
+                    ${escapeHtml(customer.customer_name || "Customer")}
+                </div>
+
+                <div style="margin-top:6px;font-size:12px;">
+                    Customer ID:
+                    <strong>${escapeHtml(customer.name || "")}</strong>
+                </div>
+
+                <div style="font-size:12px;">
+                    Route:
+                    <strong>${escapeHtml(customer.route || "")}</strong>
+                </div>
+
+                <div style="font-size:12px;">
+                    Point:
+                    <strong>${escapeHtml(customer.pickpoint__warehouse || "")}</strong>
+                </div>
+
+                <div style="margin-top:6px;font-size:11px;">
+                    ${latitude.toFixed(6)}, ${longitude.toFixed(6)}
+                </div>
+            </div>
+        `);
+
+        marker.addTo(mapInstance.value);
+
+        customerMarkers.push(marker);
+
+        bounds.push([latitude, longitude]);
+    });
+
+    /* ---------------------------------------------------
+       MAP CENTER
+    --------------------------------------------------- */
+
+    if (bounds.length > 0) {
+        mapInstance.value.fitBounds(bounds, {
+            padding: [30, 30],
+            maxZoom: 16,
+        });
+    } else {
+        const selectedPointData = points.value.find(
+            (point) => point.name === selectedPoint.value
+        );
+
+        if (
+            selectedPointData &&
+            selectedPointData.latitude &&
+            selectedPointData.longitude
+        ) {
+            mapInstance.value.setView(
+                [
+                    Number(selectedPointData.latitude),
+                    Number(selectedPointData.longitude),
+                ],
+                14
+            );
+        } else {
+            mapInstance.value.setView(
+                [17.489, 78.578],
+                12
+            );
+        }
+    }
+
+    setTimeout(() => {
+        if (mapInstance.value) {
+            mapInstance.value.invalidateSize();
+        }
+    }, 100);
+}
+
+/* -------------------------------------------------------
+   CLEAR MAP
+------------------------------------------------------- */
+
+function clearCustomerMap() {
+    customers.value = [];
+    customerCount.value = 0;
+
+    customerMarkers.length = 0;
+
+    if (mapInstance.value) {
+        mapInstance.value.remove();
+        mapInstance.value = null;
+    }
+}
+
+/* -------------------------------------------------------
+   HTML ESCAPE FOR POPUPS
+------------------------------------------------------- */
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+/* -------------------------------------------------------
+   PAGE MOUNT
+------------------------------------------------------- */
+
+onMounted(async () => {
+    emit("title", title);
+    emit("actions", []);
+
+    await loadStates();
+    await loadFilters();
+});
+
+/* -------------------------------------------------------
+   PAGE UNMOUNT
+------------------------------------------------------- */
+
+onBeforeUnmount(() => {
+    clearCustomerMap();
+});
+</script>
+
+<template>
+    <div class="h-full overflow-y-auto p-5">
+
+        <!-- PAGE HEADER -->
+        <div class="mb-5">
+            <h1 class="text-lg font-semibold text-ink-gray-9">
+                Route Planner
+            </h1>
+
+            <p class="mt-1 text-sm text-ink-gray-6">
+                Select the delivery geography to plan routes.
+            </p>
+        </div>
+
+        <!-- FILTERS -->
+        <div
+            class="grid grid-cols-1 gap-3 rounded-lg border border-outline-gray-2 bg-surface-white p-4 md:grid-cols-3 xl:grid-cols-6"
+        >
+
+            <!-- STATE -->
+            <div>
+                <label
+                    class="mb-1 block text-xs font-medium text-ink-gray-7"
+                >
+                    State
+                </label>
+
+                <select
+                    v-model="selectedState"
+                    @change="stateChanged"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">
+                        Select State
+                    </option>
+
+                    <option
+                        v-for="state in states"
+                        :key="state.name"
+                        :value="state.name"
+                    >
+                        {{ state.state_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- CITY -->
+            <div>
+                <label
+                    class="mb-1 block text-xs font-medium text-ink-gray-7"
+                >
+                    City
+                </label>
+
+                <select
+                    v-model="selectedCity"
+                    @change="cityChanged"
+                    :disabled="!selectedState || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">
+                        Select City
+                    </option>
+
+                    <option
+                        v-for="city in cities"
+                        :key="city.name"
+                        :value="city.name"
+                    >
+                        {{ city.city_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- ZONE -->
+            <div>
+                <label
+                    class="mb-1 block text-xs font-medium text-ink-gray-7"
+                >
+                    Zone
+                </label>
+
+                <select
+                    v-model="selectedZone"
+                    @change="zoneChanged"
+                    :disabled="!selectedCity || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">
+                        Select Zone
+                    </option>
+
+                    <option
+                        v-for="zone in zones"
+                        :key="zone.name"
+                        :value="zone.name"
+                    >
+                        {{ zone.zone_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- AREA -->
+            <div>
+                <label
+                    class="mb-1 block text-xs font-medium text-ink-gray-7"
+                >
+                    Area
+                </label>
+
+                <select
+                    v-model="selectedArea"
+                    @change="areaChanged"
+                    :disabled="!selectedZone || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">
+                        Select Area
+                    </option>
+
+                    <option
+                        v-for="area in areas"
+                        :key="area.name"
+                        :value="area.name"
+                    >
+                        {{ area.area_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- POINT -->
+            <div>
+                <label
+                    class="mb-1 block text-xs font-medium text-ink-gray-7"
+                >
+                    Point
+                </label>
+
+                <select
+                    v-model="selectedPoint"
+                    @change="pointChanged"
+                    :disabled="!selectedArea || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">
+                        Select Point
+                    </option>
+
+                    <option
+                        v-for="point in points"
+                        :key="point.name"
+                        :value="point.name"
+                    >
+                        {{ point.point_name }}
+                    </option>
+                </select>
+            </div>
+
+            <!-- ROUTE -->
+            <div>
+                <label
+                    class="mb-1 block text-xs font-medium text-ink-gray-7"
+                >
+                    Route
+                </label>
+
+                <select
+                    v-model="selectedRoute"
+                    @change="routeChanged"
+                    :disabled="!selectedPoint || loading"
+                    class="w-full rounded-md border border-outline-gray-2 px-3 py-2 text-sm"
+                >
+                    <option value="">
+                        Select Route
+                    </option>
+
+                    <option
+                        v-for="route in routes"
+                        :key="route.name"
+                        :value="route.name"
+                    >
+                        {{ route.route_name }}
+                    </option>
+                </select>
+            </div>
+        </div>
+
+        <!-- ERROR -->
+        <div
+            v-if="errorMessage"
+            class="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+        >
+            {{ errorMessage }}
+        </div>
+
+        <!-- LOADING -->
+        <div
+            v-if="loading"
+            class="mt-4 text-sm text-ink-gray-6"
+        >
+            Loading...
+        </div>
+
+        <!-- SELECTED GEOGRAPHY -->
+        <div
+            v-if="selectedState && selectedCity"
+            class="mt-5 rounded-lg border border-outline-gray-2 bg-surface-white p-4"
+        >
+            <div class="text-sm font-medium text-ink-gray-8">
+                Selected Geography
+            </div>
+
+            <div class="mt-2 text-sm text-ink-gray-6">
+                {{ selectedState }}
+
+                <span v-if="selectedCity">
+                    → {{ selectedCity }}
+                </span>
+
+                <span v-if="selectedZone">
+                    → {{ selectedZone }}
+                </span>
+
+                <span v-if="selectedArea">
+                    → {{ selectedArea }}
+                </span>
+
+                <span v-if="selectedPoint">
+                    → {{ selectedPoint }}
+                </span>
+
+                <span v-if="selectedRoute">
+                    → {{ selectedRoute }}
+                </span>
+            </div>
+        </div>
+
+        <!-- CUSTOMER MAP -->
+        <div
+            v-if="selectedRoute"
+            class="mt-5 rounded-lg border border-outline-gray-2 bg-surface-white p-4"
+        >
+
+            <!-- MAP HEADER -->
+            <div
+                class="mb-3 flex items-center justify-between"
+            >
+                <div>
+                    <div
+                        class="text-sm font-medium text-ink-gray-8"
+                    >
+                        Customer Map
+                    </div>
+
+                    <div
+                        class="mt-1 text-xs text-ink-gray-6"
+                    >
+                        Route: {{ selectedRoute }}
+                    </div>
+                </div>
+
+                <div
+                    class="rounded-md bg-surface-gray-2 px-3 py-2 text-sm font-medium text-ink-gray-8"
+                >
+                    {{ customerCount }} Customers
+                </div>
+            </div>
+
+            <!-- MAP -->
+            <div
+                ref="mapContainer"
+                class="w-full overflow-hidden rounded-md border border-outline-gray-2"
+                style="height: 600px;"
+            ></div>
+        </div>
+
+    </div>
+</template>

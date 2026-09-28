@@ -1,0 +1,82 @@
+{
+  "doctype": "DocType",
+  "name": "Dairy Offer",
+  "module": "Dairy Management",
+  "custom": 1,
+  "engine": "InnoDB",
+  "track_changes": 1,
+  "fields": [
+    {
+      "fieldname": "title",
+      "label": "Title",
+      "fieldtype": "Data",
+      "reqd": 1
+    },
+    {
+      "fieldname": "offer_type",
+      "label": "Offer Type",
+      "fieldtype": "Select",
+      "options": "Percentage Discount\nFixed Amount\nBuy X Get Y\nFree Item",
+      "reqd": 1
+    },
+    {
+      "fieldname": "discount_percentage",
+      "label": "Discount Percentage",
+      "fieldtype": "Percent"
+    },
+    {
+      "fieldname": "discount_amount",
+      "label": "Discount Amount",
+      "fieldtype": "Currency"
+    },
+    {
+      "fieldname": "offer_price",
+      "label": "Offer Price",
+      "fieldtype": "Currency"
+    },
+    {
+      "fieldname": "description",
+      "label": "Description",
+      "fieldtype": "Small Text"
+    },
+    {
+      "fieldname": "banner_image",
+      "label": "Banner Image",
+      "fieldtype": "Attach Image"
+    },
+    {
+      "fieldname": "valid_from",
+      "label": "Valid From",
+      "fieldtype": "Date"
+    },
+    {
+      "fieldname": "valid_to",
+      "label": "Valid To",
+      "fieldtype": "Date"
+    },
+    {
+      "fieldname": "priority",
+      "label": "Priority",
+      "fieldtype": "Int"
+    },
+    {
+      "fieldname": "status",
+      "label": "Status",
+      "fieldtype": "Select",
+      "options": "Active\nInactive",
+      "default": "Active",
+      "reqd": 1
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1,
+      "report": 1,
+      "export": 1
+    }
+  ]
+}
