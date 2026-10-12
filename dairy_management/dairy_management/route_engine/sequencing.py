@@ -2,150 +2,206 @@
 Route Optimization Engine
 Auto Sequence Engine.
 
-Generates possible customer insertion positions and evaluates
-geographic or road-based insertion cost.
+Responsibilities
+----------------
+1. Calculate geographic distance.
+2. Use OSRM road routing when available.
+3. Fall back to Haversine distance when OSRM is unavailable.
+4. Generate insertion candidates.
+5. Rank insertion positions.
+6. Generate a complete route sequence.
+7. Improve a route using deterministic 2-opt.
+8. Calculate route distance/time metrics.
+9. Compare route sequences.
 
-Routing priority:
+IMPORTANT
+---------
+This module is completely proposal-only.
 
-1. OSRM road distance + travel time when available
-2. Haversine distance fallback when OSRM is unavailable
+It does NOT:
+    - modify ERPNext documents
+    - modify customer GPS
+    - modify route assignments
+    - modify delivery orders
+    - write to the database
 
-This module does NOT modify ERPNext documents.
+The optimizer decides WHAT should change.
+The approval/write workflow decides WHEN it is actually changed.
 """
 
-from math import radians, sin, cos, sqrt, atan2
-from typing import Any, Dict, List, Optional
+from math import (
+    atan2,
+    cos,
+    radians,
+    sin,
+    sqrt,
+)
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from .routing.osrm import OSRMClient
 
 
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
 EARTH_RADIUS_KM = 6371.0088
 
+DEFAULT_AVERAGE_SPEED_KMPH = 30.0
+
+DEFAULT_MAX_2OPT_ITERATIONS = 100
+
+SEQUENCE_ENGINE_VERSION = "0.2.0"
+
 
 # ============================================================================
-# BASIC GEOGRAPHIC FUNCTIONS
+# BASIC HELPERS
 # ============================================================================
 
-def haversine_distance(
-    latitude1: float,
-    longitude1: float,
-    latitude2: float,
-    longitude2: float,
-) -> float:
+def _safe_float(
+    value: Any,
+) -> Optional[float]:
     """
-    Calculate straight-line distance between two GPS points.
-
-    Returns:
-        Distance in kilometres.
+    Safely convert a value to float.
     """
 
-    lat1 = radians(float(latitude1))
-    lon1 = radians(float(longitude1))
+    if value is None:
+        return None
 
-    lat2 = radians(float(latitude2))
-    lon2 = radians(float(longitude2))
+    try:
+        return float(value)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return None
 
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
 
-    a = (
-        sin(dlat / 2) ** 2
-        + cos(lat1)
-        * cos(lat2)
-        * sin(dlon / 2) ** 2
+def stop_id(
+    stop: Dict[str, Any],
+) -> Optional[str]:
+    """
+    Return the most useful identifier for a stop.
+    """
+
+    return (
+        stop.get("name")
+        or stop.get("customer_name")
+        or stop.get("id")
     )
-
-    c = 2 * atan2(
-        sqrt(a),
-        sqrt(1 - a),
-    )
-
-    return EARTH_RADIUS_KM * c
 
 
 def stop_has_location(
     stop: Dict[str, Any],
 ) -> bool:
     """
-    Check whether a stop has valid GPS coordinates.
+    Check whether a stop has valid latitude/longitude.
     """
 
-    latitude = stop.get("latitude")
-    longitude = stop.get("longitude")
+    latitude = _safe_float(
+        stop.get("latitude")
+    )
+
+    longitude = _safe_float(
+        stop.get("longitude")
+    )
 
     if latitude is None or longitude is None:
         return False
 
-    try:
-        latitude = float(latitude)
-        longitude = float(longitude)
-
-    except (TypeError, ValueError):
+    if latitude < -90 or latitude > 90:
         return False
 
+    if longitude < -180 or longitude > 180:
+        return False
+
+    return True
+
+
+def coordinates(
+    stop: Dict[str, Any],
+) -> Optional[Tuple[float, float]]:
+    """
+    Return (latitude, longitude).
+    """
+
+    if not stop_has_location(stop):
+        return None
+
     return (
-        -90 <= latitude <= 90
-        and -180 <= longitude <= 180
+        float(stop["latitude"]),
+        float(stop["longitude"]),
     )
 
 
-def distance_between_stops(
-    stop_a: Dict[str, Any],
-    stop_b: Dict[str, Any],
+# ============================================================================
+# HAVERSINE
+# ============================================================================
+
+def haversine_distance(
+    first: Dict[str, Any],
+    second: Dict[str, Any],
 ) -> Optional[float]:
     """
-    Calculate straight-line geographic distance between two stops.
-
-    Returns:
-        Distance in kilometres.
-
-    Returns None when either stop does not have valid GPS.
+    Calculate straight-line distance in kilometres.
     """
 
-    if not stop_has_location(stop_a):
-        return None
-
-    if not stop_has_location(stop_b):
-        return None
-
-    return haversine_distance(
-        stop_a["latitude"],
-        stop_a["longitude"],
-        stop_b["latitude"],
-        stop_b["longitude"],
+    first_coordinates = coordinates(
+        first
     )
 
+    second_coordinates = coordinates(
+        second
+    )
 
-def sequence_distance(
-    stops: List[Dict[str, Any]],
-) -> Optional[float]:
-    """
-    Calculate total straight-line geographic distance between
-    consecutive stops.
+    if (
+        first_coordinates is None
+        or second_coordinates is None
+    ):
+        return None
 
-    This function intentionally remains Haversine-based.
+    lat1, lon1 = first_coordinates
+    lat2, lon2 = second_coordinates
 
-    OSRM road distance is handled separately by RoutingEngine.
-    """
+    lat1 = radians(lat1)
+    lat2 = radians(lat2)
 
-    if len(stops) <= 1:
-        return 0.0
+    delta_lat = radians(
+        lat2 - lat1
+    )
 
-    total_distance = 0.0
+    delta_lon = radians(
+        lon2 - lon1
+    )
 
-    for index in range(len(stops) - 1):
+    value = (
+        sin(delta_lat / 2) ** 2
+        + cos(lat1)
+        * cos(lat2)
+        * sin(delta_lon / 2) ** 2
+    )
 
-        distance = distance_between_stops(
-            stops[index],
-            stops[index + 1],
-        )
+    value = min(
+        1.0,
+        max(0.0, value),
+    )
 
-        if distance is None:
-            return None
+    angular_distance = 2 * atan2(
+        sqrt(value),
+        sqrt(1 - value),
+    )
 
-        total_distance += distance
-
-    return total_distance
+    return (
+        EARTH_RADIUS_KM
+        * angular_distance
+    )
 
 
 # ============================================================================
@@ -154,241 +210,464 @@ def sequence_distance(
 
 class RoutingEngine:
     """
-    Routing abstraction used by the sequence optimizer.
+    Routing abstraction.
 
-    Preferred routing provider:
+    Preferred provider:
         OSRM
 
-    Fallback:
-        Haversine geographic distance
+    Fallback provider:
+        Haversine distance
 
-    The optimizer does not need to know whether routing came
-    from OSRM or the fallback implementation.
+    The interface is intentionally independent of the optimizer.
     """
 
     def __init__(
         self,
-        osrm_client: Optional[OSRMClient] = None,
+        osrm_client: Optional[
+            OSRMClient
+        ] = None,
+        average_speed_kmph: float = (
+            DEFAULT_AVERAGE_SPEED_KMPH
+        ),
     ):
-        self.osrm = osrm_client or OSRMClient()
+        self.osrm = (
+            osrm_client
+            or OSRMClient()
+        )
 
-    def is_road_routing_available(self) -> bool:
+        self.average_speed_kmph = (
+            float(
+                average_speed_kmph
+            )
+        )
+
+    # ----------------------------------------------------------------------
+    # OSRM AVAILABILITY
+    # ----------------------------------------------------------------------
+
+    def is_road_routing_available(
+        self,
+    ) -> bool:
         """
-        Check whether the configured OSRM server is available.
+        Return whether OSRM is reachable.
         """
 
-        return self.osrm.is_available()
+        try:
+            return bool(
+                self.osrm.is_available()
+            )
+        except Exception:
+            return False
 
-    @staticmethod
+    # ----------------------------------------------------------------------
+    # STOP COORDINATES
+    # ----------------------------------------------------------------------
+
     def _coordinates_from_stops(
-        stops: List[Dict[str, Any]],
-    ) -> Optional[List[List[float]]]:
+        self,
+        stops: Sequence[
+            Dict[str, Any]
+        ],
+    ) -> List[
+        Tuple[float, float]
+    ]:
         """
-        Convert stops into OSRM coordinate format.
-
-        OSRM expects:
-
-            [longitude, latitude]
-
-        Example:
-
-            [
-                [78.4867, 17.3850],
-                [78.4800, 17.3900]
-            ]
+        Convert stops into coordinate tuples.
         """
 
-        coordinates = []
+        result = []
 
         for stop in stops:
 
-            if not stop_has_location(stop):
-                return None
-
-            coordinates.append(
-                [
-                    float(stop["longitude"]),
-                    float(stop["latitude"]),
-                ]
+            point = coordinates(
+                stop
             )
 
-        return coordinates
-
-    def sequence_metrics(
-        self,
-        stops: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """
-        Calculate routing metrics for a complete stop sequence.
-
-        OSRM available:
-
-            road distance
-            road travel time
-
-        OSRM unavailable:
-
-            Haversine distance
-            travel time unavailable
-
-        Returns:
-
-            {
-                "distance_km": float,
-                "duration_min": float | None,
-                "provider": "osrm" | "haversine_fallback" | "none",
-            }
-        """
-
-        if len(stops) <= 1:
-            return {
-                "distance_km": 0.0,
-                "duration_min": 0.0,
-                "provider": "none",
-            }
-
-        coordinates = self._coordinates_from_stops(
-            stops
-        )
-
-        if coordinates is None:
-            return {
-                "distance_km": None,
-                "duration_min": None,
-                "provider": "unavailable",
-            }
-
-        # ------------------------------------------------------------
-        # Try OSRM first
-        # ------------------------------------------------------------
-
-        if self.is_road_routing_available():
-
-            try:
-
-                result = self.osrm.route(
-                    coordinates,
-                    overview="false",
-                    steps=False,
+            if point is None:
+                raise ValueError(
+                    "All route stops must "
+                    "have valid latitude "
+                    "and longitude"
                 )
 
-                return {
-                    "distance_km": result.get(
-                        "distance_km"
-                    ),
-                    "duration_min": result.get(
-                        "duration_min"
-                    ),
-                    "provider": "osrm",
-                }
+            result.append(point)
 
-            except Exception:
-                # Do not break route optimization if OSRM
-                # temporarily becomes unavailable.
-                pass
+        return result
 
-        # ------------------------------------------------------------
-        # Haversine fallback
-        # ------------------------------------------------------------
-
-        geographic_distance = sequence_distance(
-            stops
-        )
-
-        return {
-            "distance_km": geographic_distance,
-            "duration_min": None,
-            "provider": "haversine_fallback",
-        }
+    # ----------------------------------------------------------------------
+    # DISTANCE BETWEEN TWO STOPS
+    # ----------------------------------------------------------------------
 
     def distance(
         self,
-        stops: List[Dict[str, Any]],
+        first: Dict[str, Any],
+        second: Dict[str, Any],
     ) -> Optional[float]:
         """
-        Convenience method returning only distance.
+        Return distance in kilometres.
+
+        OSRM is preferred.
+
+        Haversine is used as fallback.
         """
 
-        metrics = self.sequence_metrics(
-            stops
+        if not (
+            stop_has_location(first)
+            and stop_has_location(second)
+        ):
+            return None
+
+        try:
+
+            if self.is_road_routing_available():
+
+                result = self.osrm.route(
+                    coordinates=[
+                        coordinates(first),
+                        coordinates(second),
+                    ],
+                    overview=False,
+                    steps=False,
+                )
+
+                if result:
+
+                    distance_m = (
+                        result.get(
+                            "distance"
+                        )
+                    )
+
+                    if distance_m is not None:
+
+                        return (
+                            float(
+                                distance_m
+                            )
+                            / 1000.0
+                        )
+
+        except Exception:
+            pass
+
+        return haversine_distance(
+            first,
+            second,
         )
 
-        return metrics.get(
-            "distance_km"
-        )
+    # ----------------------------------------------------------------------
+    # TRAVEL TIME BETWEEN TWO STOPS
+    # ----------------------------------------------------------------------
 
     def travel_time(
         self,
-        stops: List[Dict[str, Any]],
+        first: Dict[str, Any],
+        second: Dict[str, Any],
     ) -> Optional[float]:
         """
-        Convenience method returning travel time in minutes.
+        Return travel time in minutes.
 
-        Returns None when OSRM is unavailable.
+        OSRM is preferred.
+
+        Haversine fallback estimates travel time
+        using average speed.
         """
 
-        metrics = self.sequence_metrics(
-            stops
+        if not (
+            stop_has_location(first)
+            and stop_has_location(second)
+        ):
+            return None
+
+        try:
+
+            if self.is_road_routing_available():
+
+                result = self.osrm.route(
+                    coordinates=[
+                        coordinates(first),
+                        coordinates(second),
+                    ],
+                    overview=False,
+                    steps=False,
+                )
+
+                if result:
+
+                    duration_seconds = (
+                        result.get(
+                            "duration"
+                        )
+                    )
+
+                    if duration_seconds is not None:
+
+                        return (
+                            float(
+                                duration_seconds
+                            )
+                            / 60.0
+                        )
+
+        except Exception:
+            pass
+
+        distance_km = (
+            haversine_distance(
+                first,
+                second,
+            )
         )
 
-        return metrics.get(
-            "duration_min"
+        if distance_km is None:
+            return None
+
+        if (
+            self.average_speed_kmph
+            <= 0
+        ):
+            return None
+
+        return (
+            distance_km
+            / self.average_speed_kmph
+            * 60.0
         )
+
+    # ----------------------------------------------------------------------
+    # SEQUENCE METRICS
+    # ----------------------------------------------------------------------
+
+    def sequence_metrics(
+        self,
+        stops: Sequence[
+            Dict[str, Any]
+        ],
+    ) -> Dict[str, Any]:
+        """
+        Calculate total distance and travel time
+        for a complete sequence.
+        """
+
+        stops = list(stops)
+
+        if len(stops) <= 1:
+
+            return {
+                "distance_km": 0.0,
+                "travel_time_min": 0.0,
+                "provider": (
+                    "none"
+                    if not stops
+                    else "single_stop"
+                ),
+            }
+
+        total_distance = 0.0
+        total_time = 0.0
+
+        used_haversine = False
+        used_osrm = False
+
+        for index in range(
+            len(stops) - 1
+        ):
+
+            first = stops[index]
+            second = stops[index + 1]
+
+            distance_km = self.distance(
+                first,
+                second,
+            )
+
+            if distance_km is None:
+
+                return {
+                    "distance_km": None,
+                    "travel_time_min": None,
+                    "provider": "invalid",
+                }
+
+            total_distance += (
+                distance_km
+            )
+
+            try:
+
+                road_available = (
+                    self.is_road_routing_available()
+                )
+
+            except Exception:
+
+                road_available = False
+
+            if road_available:
+
+                used_osrm = True
+
+            else:
+
+                used_haversine = True
+
+            travel_time_min = (
+                self.travel_time(
+                    first,
+                    second,
+                )
+            )
+
+            if travel_time_min is not None:
+
+                total_time += (
+                    travel_time_min
+                )
+
+        if (
+            used_osrm
+            and not used_haversine
+        ):
+            provider = "osrm"
+
+        elif used_haversine:
+
+            provider = (
+                "haversine_fallback"
+            )
+
+        else:
+
+            provider = "unknown"
+
+        return {
+            "distance_km": (
+                total_distance
+            ),
+            "travel_time_min": (
+                total_time
+            ),
+            "provider": provider,
+        }
 
 
 # ============================================================================
-# INSERTION CANDIDATES
+# LEGACY COMPATIBILITY FUNCTIONS
+# ============================================================================
+
+def distance_between_stops(
+    first: Dict[str, Any],
+    second: Dict[str, Any],
+) -> Optional[float]:
+    """
+    Backward-compatible Haversine distance.
+    """
+
+    return haversine_distance(
+        first,
+        second,
+    )
+
+
+def sequence_distance(
+    stops: Sequence[
+        Dict[str, Any]
+    ],
+) -> Optional[float]:
+    """
+    Backward-compatible total Haversine distance.
+    """
+
+    stops = list(stops)
+
+    if len(stops) <= 1:
+        return 0.0
+
+    total = 0.0
+
+    for index in range(
+        len(stops) - 1
+    ):
+
+        distance = (
+            haversine_distance(
+                stops[index],
+                stops[index + 1],
+            )
+        )
+
+        if distance is None:
+            return None
+
+        total += distance
+
+    return total
+
+
+def calculate_sequence_metrics(
+    stops: Sequence[
+        Dict[str, Any]
+    ],
+    routing_engine: Optional[
+        RoutingEngine
+    ] = None,
+) -> Dict[str, Any]:
+    """
+    Calculate route metrics using RoutingEngine.
+    """
+
+    engine = (
+        routing_engine
+        or RoutingEngine()
+    )
+
+    return engine.sequence_metrics(
+        list(stops)
+    )
+
+
+# ============================================================================
+# INSERTION
 # ============================================================================
 
 def generate_insertion_candidates(
-    existing_stops: List[Dict[str, Any]],
+    stops: Sequence[
+        Dict[str, Any]
+    ],
     new_stop: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+) -> List[
+    Dict[str, Any]
+]:
     """
-    Generate every possible position where a new stop can
-    be inserted.
+    Generate every possible insertion position.
 
-    Example:
+    Position 0:
+        before the first stop
 
-        Existing:
-
-            A -> B -> C
-
-        Candidates:
-
-            X -> A -> B -> C
-            A -> X -> B -> C
-            A -> B -> X -> C
-            A -> B -> C -> X
-
-    This function uses geographic distance for compatibility
-    with the original sequencing engine.
+    Position len(stops):
+        after the final stop
     """
+
+    stops = list(stops)
 
     candidates = []
 
     for position in range(
-        len(existing_stops) + 1
+        len(stops) + 1
     ):
 
-        new_sequence = list(
-            existing_stops
-        )
-
-        new_sequence.insert(
-            position,
-            new_stop,
-        )
-
-        distance = sequence_distance(
-            new_sequence
+        candidate_sequence = (
+            stops[:position]
+            + [new_stop]
+            + stops[position:]
         )
 
         candidates.append(
             {
                 "position": position,
-                "sequence": new_sequence,
-                "distance_km": distance,
+                "sequence": (
+                    candidate_sequence
+                ),
             }
         )
 
@@ -396,129 +675,186 @@ def generate_insertion_candidates(
 
 
 def calculate_insertion_cost(
-    existing_stops: List[Dict[str, Any]],
+    stops: Sequence[
+        Dict[str, Any]
+    ],
     new_stop: Dict[str, Any],
     position: int,
-) -> Optional[float]:
+) -> Dict[str, Any]:
     """
-    Calculate incremental geographic distance caused
-    by inserting a customer at a specific position.
-
-    Lower is better.
-
-    Returns None if calculation cannot be performed.
+    Calculate incremental Haversine distance caused
+    by inserting a stop.
     """
 
-    if position < 0:
-        return None
+    stops = list(stops)
 
-    if position > len(existing_stops):
-        return None
-
-    # ------------------------------------------------------------
-    # Existing sequence
-    # ------------------------------------------------------------
-
-    before_sequence = list(
-        existing_stops
+    before = (
+        stops[position - 1]
+        if position > 0
+        else None
     )
 
-    before_distance = sequence_distance(
-        before_sequence
+    after = (
+        stops[position]
+        if position < len(stops)
+        else None
     )
 
-    # ------------------------------------------------------------
-    # New sequence
-    # ------------------------------------------------------------
+    if before is None and after is None:
 
-    after_sequence = list(
-        existing_stops
+        return {
+            "incremental_distance_km": 0.0,
+            "total_distance_km": 0.0,
+        }
+
+    if before is None:
+
+        added = haversine_distance(
+            new_stop,
+            after,
+        )
+
+        if added is None:
+            return {
+                "incremental_distance_km": None,
+                "total_distance_km": None,
+            }
+
+        existing = sequence_distance(
+            stops
+        ) or 0.0
+
+        return {
+            "incremental_distance_km": (
+                added
+            ),
+            "total_distance_km": (
+                existing + added
+            ),
+        }
+
+    if after is None:
+
+        added = haversine_distance(
+            before,
+            new_stop,
+        )
+
+        if added is None:
+            return {
+                "incremental_distance_km": None,
+                "total_distance_km": None,
+            }
+
+        existing = sequence_distance(
+            stops
+        ) or 0.0
+
+        return {
+            "incremental_distance_km": (
+                added
+            ),
+            "total_distance_km": (
+                existing + added
+            ),
+        }
+
+    old_leg = haversine_distance(
+        before,
+        after,
     )
 
-    after_sequence.insert(
-        position,
+    new_leg_1 = haversine_distance(
+        before,
         new_stop,
     )
 
-    after_distance = sequence_distance(
-        after_sequence
+    new_leg_2 = haversine_distance(
+        new_stop,
+        after,
     )
 
-    if before_distance is None:
-        return None
+    if (
+        old_leg is None
+        or new_leg_1 is None
+        or new_leg_2 is None
+    ):
 
-    if after_distance is None:
-        return None
+        return {
+            "incremental_distance_km": None,
+            "total_distance_km": None,
+        }
 
-    return (
-        after_distance
-        - before_distance
+    incremental = (
+        new_leg_1
+        + new_leg_2
+        - old_leg
     )
+
+    existing = sequence_distance(
+        stops
+    ) or 0.0
+
+    return {
+        "incremental_distance_km": (
+            incremental
+        ),
+        "total_distance_km": (
+            existing + incremental
+        ),
+    }
 
 
 def rank_insertion_candidates(
-    existing_stops: List[Dict[str, Any]],
+    stops: Sequence[
+        Dict[str, Any]
+    ],
     new_stop: Dict[str, Any],
-) -> List[Dict[str, Any]]:
+) -> List[
+    Dict[str, Any]
+]:
     """
-    Generate and rank insertion candidates.
-
-    Ranking is based on lowest incremental
-    geographic distance.
-
-    This remains the original deterministic
-    Haversine ranking function.
+    Rank insertion positions using Haversine distance.
     """
 
     candidates = []
 
-    for position in range(
-        len(existing_stops) + 1
+    for candidate in generate_insertion_candidates(
+        stops,
+        new_stop,
     ):
 
-        insertion_cost = (
-            calculate_insertion_cost(
-                existing_stops,
-                new_stop,
-                position,
-            )
-        )
+        position = candidate[
+            "position"
+        ]
 
-        sequence = list(
-            existing_stops
-        )
-
-        sequence.insert(
-            position,
+        cost = calculate_insertion_cost(
+            stops,
             new_stop,
+            position,
         )
 
-        total_distance = sequence_distance(
-            sequence
-        )
+        if (
+            cost[
+                "incremental_distance_km"
+            ]
+            is None
+        ):
+            continue
 
         candidates.append(
             {
-                "position": position,
-                "sequence": sequence,
-                "incremental_distance_km": (
-                    insertion_cost
-                ),
-                "total_distance_km": (
-                    total_distance
-                ),
+                **candidate,
+                **cost,
             }
         )
 
     candidates.sort(
-        key=lambda candidate: (
-            candidate[
+        key=lambda item: (
+            item[
                 "incremental_distance_km"
-            ]
-            if candidate[
-                "incremental_distance_km"
-            ] is not None
-            else float("inf")
+            ],
+            item["position"],
         )
     )
 
@@ -526,7 +862,9 @@ def rank_insertion_candidates(
         candidates,
         start=1,
     ):
-        candidate["rank"] = rank
+        candidate[
+            "rank"
+        ] = rank
 
     return candidates
 
@@ -536,218 +874,187 @@ def rank_insertion_candidates(
 # ============================================================================
 
 def calculate_road_insertion_cost(
-    existing_stops: List[Dict[str, Any]],
+    stops: Sequence[
+        Dict[str, Any]
+    ],
     new_stop: Dict[str, Any],
     position: int,
-    routing_engine: Optional[RoutingEngine] = None,
-) -> Optional[float]:
+    routing_engine: Optional[
+        RoutingEngine
+    ] = None,
+) -> Dict[str, Any]:
     """
-    Calculate incremental route distance using the routing engine.
+    Calculate insertion cost using the RoutingEngine.
 
-    OSRM is used when available.
-
-    Haversine is used as fallback.
-
-    Returns:
-        Incremental distance in kilometres.
+    OSRM is preferred when available.
     """
 
-    if position < 0:
-        return None
-
-    if position > len(existing_stops):
-        return None
-
-    routing = (
+    engine = (
         routing_engine
         or RoutingEngine()
     )
 
-    # ------------------------------------------------------------
-    # Before insertion
-    # ------------------------------------------------------------
+    stops = list(stops)
 
-    before_sequence = list(
-        existing_stops
+    original_metrics = (
+        engine.sequence_metrics(
+            stops
+        )
     )
 
-    before_metrics = routing.sequence_metrics(
-        before_sequence
+    candidate_sequence = (
+        stops[:position]
+        + [new_stop]
+        + stops[position:]
     )
 
-    before_distance = before_metrics.get(
-        "distance_km"
+    candidate_metrics = (
+        engine.sequence_metrics(
+            candidate_sequence
+        )
     )
 
-    # ------------------------------------------------------------
-    # After insertion
-    # ------------------------------------------------------------
+    if (
+        original_metrics[
+            "distance_km"
+        ]
+        is None
+        or candidate_metrics[
+            "distance_km"
+        ]
+        is None
+    ):
 
-    after_sequence = list(
-        existing_stops
+        return {
+            "incremental_distance_km": None,
+            "total_distance_km": None,
+            "incremental_time_min": None,
+            "total_time_min": None,
+            "provider": (
+                candidate_metrics.get(
+                    "provider"
+                )
+            ),
+        }
+
+    original_time = (
+        original_metrics.get(
+            "travel_time_min"
+        )
+        or 0.0
     )
 
-    after_sequence.insert(
-        position,
-        new_stop,
+    candidate_time = (
+        candidate_metrics.get(
+            "travel_time_min"
+        )
+        or 0.0
     )
 
-    after_metrics = routing.sequence_metrics(
-        after_sequence
-    )
-
-    after_distance = after_metrics.get(
-        "distance_km"
-    )
-
-    if before_distance is None:
-        return None
-
-    if after_distance is None:
-        return None
-
-    return (
-        after_distance
-        - before_distance
-    )
+    return {
+        "incremental_distance_km": (
+            candidate_metrics[
+                "distance_km"
+            ]
+            - original_metrics[
+                "distance_km"
+            ]
+        ),
+        "total_distance_km": (
+            candidate_metrics[
+                "distance_km"
+            ]
+        ),
+        "incremental_time_min": (
+            candidate_time
+            - original_time
+        ),
+        "total_time_min": (
+            candidate_time
+        ),
+        "provider": (
+            candidate_metrics.get(
+                "provider"
+            )
+        ),
+    }
 
 
 def rank_road_insertion_candidates(
-    existing_stops: List[Dict[str, Any]],
+    stops: Sequence[
+        Dict[str, Any]
+    ],
     new_stop: Dict[str, Any],
-    routing_engine: Optional[RoutingEngine] = None,
-) -> List[Dict[str, Any]]:
+    routing_engine: Optional[
+        RoutingEngine
+    ] = None,
+) -> List[
+    Dict[str, Any]
+]:
     """
-    Generate and rank insertion candidates using the routing engine.
+    Rank insertion positions using the RoutingEngine.
 
-    Preferred:
+    Ranking priority:
 
-        OSRM road distance
-
-    Fallback:
-
-        Haversine distance
-
-    Each candidate includes:
-
-        position
-        sequence
-        incremental_distance_km
-        total_distance_km
-        duration_min
-        provider
-        rank
+        1. incremental distance
+        2. incremental travel time
+        3. insertion position
     """
 
-    routing = (
+    engine = (
         routing_engine
         or RoutingEngine()
     )
 
     candidates = []
 
-    for position in range(
-        len(existing_stops) + 1
+    for candidate in generate_insertion_candidates(
+        stops,
+        new_stop,
     ):
 
-        # --------------------------------------------------------
-        # Build candidate sequence
-        # --------------------------------------------------------
+        position = candidate[
+            "position"
+        ]
 
-        sequence = list(
-            existing_stops
-        )
-
-        sequence.insert(
-            position,
-            new_stop,
-        )
-
-        # --------------------------------------------------------
-        # Candidate metrics
-        # --------------------------------------------------------
-
-        metrics = routing.sequence_metrics(
-            sequence
-        )
-
-        total_distance = metrics.get(
-            "distance_km"
-        )
-
-        duration_min = metrics.get(
-            "duration_min"
-        )
-
-        provider = metrics.get(
-            "provider"
-        )
-
-        # --------------------------------------------------------
-        # Existing sequence metrics
-        # --------------------------------------------------------
-
-        before_metrics = (
-            routing.sequence_metrics(
-                existing_stops
-            )
-        )
-
-        before_distance = (
-            before_metrics.get(
-                "distance_km"
+        cost = (
+            calculate_road_insertion_cost(
+                stops=stops,
+                new_stop=new_stop,
+                position=position,
+                routing_engine=engine,
             )
         )
 
         if (
-            before_distance is None
-            or total_distance is None
+            cost[
+                "incremental_distance_km"
+            ]
+            is None
         ):
-            incremental_distance = None
-
-        else:
-            incremental_distance = (
-                total_distance
-                - before_distance
-            )
+            continue
 
         candidates.append(
             {
-                "position": position,
-                "sequence": sequence,
-                "incremental_distance_km": (
-                    incremental_distance
-                ),
-                "total_distance_km": (
-                    total_distance
-                ),
-                "duration_min": (
-                    duration_min
-                ),
-                "provider": provider,
+                **candidate,
+                **cost,
             }
         )
 
-    # ------------------------------------------------------------
-    # Rank
-    # ------------------------------------------------------------
-
     candidates.sort(
-        key=lambda candidate: (
-            candidate[
+        key=lambda item: (
+            item[
                 "incremental_distance_km"
-            ]
-            if candidate[
-                "incremental_distance_km"
-            ] is not None
+            ],
+            item.get(
+                "incremental_time_min"
+            )
+            if item.get(
+                "incremental_time_min"
+            )
+            is not None
             else float("inf"),
-            candidate[
-                "total_distance_km"
-            ]
-            if candidate[
-                "total_distance_km"
-            ] is not None
-            else float("inf"),
+            item["position"],
         )
     )
 
@@ -755,104 +1062,660 @@ def rank_road_insertion_candidates(
         candidates,
         start=1,
     ):
-        candidate["rank"] = rank
+
+        candidate[
+            "rank"
+        ] = rank
 
     return candidates
 
 
 # ============================================================================
-# ROUTE SEQUENCE METRICS
+# NEAREST NEIGHBOR
 # ============================================================================
 
-def calculate_sequence_metrics(
-    stops: List[Dict[str, Any]],
-    routing_engine: Optional[RoutingEngine] = None,
-) -> Dict[str, Any]:
+def nearest_neighbor_sequence(
+    stops: Sequence[
+        Dict[str, Any]
+    ],
+    start_stop: Optional[
+        Dict[str, Any]
+    ] = None,
+    routing_engine: Optional[
+        RoutingEngine
+    ] = None,
+) -> List[
+    Dict[str, Any]
+]:
     """
-    Calculate complete metrics for a route sequence.
+    Generate an initial deterministic sequence.
 
-    Returns:
+    If start_stop is supplied, that stop is kept first.
 
-        {
-            "distance_km": ...,
-            "duration_min": ...,
-            "provider": ...
-        }
+    Otherwise the first supplied stop is used.
+
+    Remaining stops are selected using the shortest
+    available next-leg distance.
     """
 
-    routing = (
+    stops = list(stops)
+
+    if len(stops) <= 2:
+        return list(stops)
+
+    engine = (
         routing_engine
         or RoutingEngine()
     )
 
-    return routing.sequence_metrics(
-        stops
-    )
+    remaining = list(stops)
+
+    if start_stop is not None:
+
+        start_key = stop_id(
+            start_stop
+        )
+
+        selected_index = None
+
+        for index, stop in enumerate(
+            remaining
+        ):
+
+            if (
+                stop_id(stop)
+                == start_key
+            ):
+                selected_index = index
+                break
+
+        if selected_index is not None:
+
+            current = remaining.pop(
+                selected_index
+            )
+
+        else:
+
+            current = remaining.pop(
+                0
+            )
+
+    else:
+
+        current = remaining.pop(
+            0
+        )
+
+    sequence = [
+        current
+    ]
+
+    while remaining:
+
+        best_index = None
+        best_distance = None
+
+        for index, candidate in enumerate(
+            remaining
+        ):
+
+            distance = engine.distance(
+                current,
+                candidate,
+            )
+
+            if distance is None:
+                continue
+
+            if (
+                best_distance is None
+                or distance < best_distance
+                or (
+                    distance
+                    == best_distance
+                    and str(
+                        stop_id(
+                            candidate
+                        )
+                    )
+                    <
+                    str(
+                        stop_id(
+                            remaining[
+                                best_index
+                            ]
+                        )
+                    )
+                )
+            ):
+
+                best_index = index
+                best_distance = distance
+
+        if best_index is None:
+
+            # Deterministic fallback for stops
+            # without usable routing.
+
+            remaining.sort(
+                key=lambda item: str(
+                    stop_id(item)
+                )
+            )
+
+            next_stop = remaining.pop(
+                0
+            )
+
+        else:
+
+            next_stop = remaining.pop(
+                best_index
+            )
+
+        sequence.append(
+            next_stop
+        )
+
+        current = next_stop
+
+    return sequence
 
 
 # ============================================================================
-# SIMPLE ROUTE COMPARISON
+# 2-OPT
+# ============================================================================
+
+def _two_opt_swap(
+    sequence: List[
+        Dict[str, Any]
+    ],
+    first_index: int,
+    second_index: int,
+) -> List[
+    Dict[str, Any]
+]:
+    """
+    Reverse the section between two indices.
+    """
+
+    return (
+        sequence[:first_index]
+        + list(
+            reversed(
+                sequence[
+                    first_index:
+                    second_index + 1
+                ]
+            )
+        )
+        + sequence[
+            second_index + 1:
+        ]
+    )
+
+
+def optimize_sequence_2opt(
+    stops: Sequence[
+        Dict[str, Any]
+    ],
+    routing_engine: Optional[
+        RoutingEngine
+    ] = None,
+    max_iterations: int = (
+        DEFAULT_MAX_2OPT_ITERATIONS
+    ),
+    start_stop: Optional[
+        Dict[str, Any]
+    ] = None,
+) -> Dict[str, Any]:
+    """
+    Improve a route sequence using deterministic 2-opt.
+
+    The algorithm:
+
+        1. Build nearest-neighbor sequence.
+        2. Calculate current route cost.
+        3. Test pairwise edge reversals.
+        4. Keep only strict improvements.
+        5. Repeat until no improvement remains
+           or max_iterations is reached.
+
+    The first stop can optionally be fixed.
+
+    This is a local deterministic optimizer.
+    """
+
+    engine = (
+        routing_engine
+        or RoutingEngine()
+    )
+
+    stops = list(stops)
+
+    if len(stops) <= 2:
+
+        sequence = list(stops)
+
+        return {
+            "sequence": sequence,
+            "metrics": (
+                engine.sequence_metrics(
+                    sequence
+                )
+            ),
+            "iterations": 0,
+            "improved": False,
+        }
+
+    sequence = nearest_neighbor_sequence(
+        stops,
+        start_stop=start_stop,
+        routing_engine=engine,
+    )
+
+    best_metrics = (
+        engine.sequence_metrics(
+            sequence
+        )
+    )
+
+    best_distance = (
+        best_metrics[
+            "distance_km"
+        ]
+    )
+
+    if best_distance is None:
+
+        return {
+            "sequence": sequence,
+            "metrics": best_metrics,
+            "iterations": 0,
+            "improved": False,
+        }
+
+    improved = False
+    iterations = 0
+
+    # If a start stop is fixed, do not reverse
+    # the first element.
+    start_index = (
+        1
+        if start_stop is not None
+        else 0
+    )
+
+    while (
+        iterations
+        < max_iterations
+    ):
+
+        iteration_improved = False
+
+        for first_index in range(
+            start_index,
+            len(sequence) - 1,
+        ):
+
+            for second_index in range(
+                first_index + 1,
+                len(sequence),
+            ):
+
+                candidate = (
+                    _two_opt_swap(
+                        sequence,
+                        first_index,
+                        second_index,
+                    )
+                )
+
+                candidate_metrics = (
+                    engine.sequence_metrics(
+                        candidate
+                    )
+                )
+
+                candidate_distance = (
+                    candidate_metrics[
+                        "distance_km"
+                    ]
+                )
+
+                if candidate_distance is None:
+                    continue
+
+                # Strict improvement only.
+                #
+                # This prevents oscillation and makes
+                # the algorithm deterministic.
+
+                if (
+                    candidate_distance
+                    < best_distance
+                    - 1e-9
+                ):
+
+                    sequence = candidate
+
+                    best_metrics = (
+                        candidate_metrics
+                    )
+
+                    best_distance = (
+                        candidate_distance
+                    )
+
+                    improved = True
+                    iteration_improved = True
+
+                    break
+
+            if iteration_improved:
+                break
+
+        iterations += 1
+
+        if not iteration_improved:
+            break
+
+    return {
+        "sequence": sequence,
+        "metrics": best_metrics,
+        "iterations": iterations,
+        "improved": improved,
+    }
+
+
+# ============================================================================
+# FULL ROUTE SEQUENCING
+# ============================================================================
+
+def generate_route_sequence(
+    stops: Sequence[
+        Dict[str, Any]
+    ],
+    routing_engine: Optional[
+        RoutingEngine
+    ] = None,
+    start_stop: Optional[
+        Dict[str, Any]
+    ] = None,
+    max_2opt_iterations: int = (
+        DEFAULT_MAX_2OPT_ITERATIONS
+    ),
+) -> Dict[str, Any]:
+    """
+    Generate and optimize a complete route sequence.
+
+    This is the main Auto Sequence entry point.
+    """
+
+    engine = (
+        routing_engine
+        or RoutingEngine()
+    )
+
+    stops = list(stops)
+
+    if not stops:
+
+        return {
+            "sequence": [],
+            "metrics": {
+                "distance_km": 0.0,
+                "travel_time_min": 0.0,
+                "provider": "none",
+            },
+            "iterations": 0,
+            "improved": False,
+            "engine_version": (
+                SEQUENCE_ENGINE_VERSION
+            ),
+        }
+
+    result = optimize_sequence_2opt(
+        stops=stops,
+        routing_engine=engine,
+        max_iterations=(
+            max_2opt_iterations
+        ),
+        start_stop=start_stop,
+    )
+
+    return {
+        **result,
+        "engine_version": (
+            SEQUENCE_ENGINE_VERSION
+        ),
+    }
+
+
+# ============================================================================
+# SEQUENCE COMPARISON
 # ============================================================================
 
 def compare_sequences(
-    sequences: List[List[Dict[str, Any]]],
-    routing_engine: Optional[RoutingEngine] = None,
-) -> List[Dict[str, Any]]:
+    original: Sequence[
+        Dict[str, Any]
+    ],
+    candidate: Sequence[
+        Dict[str, Any]
+    ],
+    routing_engine: Optional[
+        RoutingEngine
+    ] = None,
+) -> Dict[str, Any]:
     """
-    Calculate and rank multiple complete route sequences.
+    Compare two route sequences.
 
-    This is useful later when the optimizer generates
-    multiple route alternatives.
-
-    No route is automatically assigned or saved.
+    Returns distance/time difference and provider.
     """
 
-    routing = (
+    engine = (
         routing_engine
         or RoutingEngine()
     )
 
-    results = []
+    original = list(
+        original
+    )
 
-    for index, sequence in enumerate(
-        sequences
+    candidate = list(
+        candidate
+    )
+
+    original_metrics = (
+        engine.sequence_metrics(
+            original
+        )
+    )
+
+    candidate_metrics = (
+        engine.sequence_metrics(
+            candidate
+        )
+    )
+
+    original_distance = (
+        original_metrics.get(
+            "distance_km"
+        )
+    )
+
+    candidate_distance = (
+        candidate_metrics.get(
+            "distance_km"
+        )
+    )
+
+    original_time = (
+        original_metrics.get(
+            "travel_time_min"
+        )
+    )
+
+    candidate_time = (
+        candidate_metrics.get(
+            "travel_time_min"
+        )
+    )
+
+    distance_change = None
+
+    if (
+        original_distance is not None
+        and candidate_distance is not None
     ):
 
-        metrics = routing.sequence_metrics(
-            sequence
+        distance_change = (
+            candidate_distance
+            - original_distance
         )
 
-        results.append(
-            {
-                "candidate_index": index,
-                "sequence": sequence,
-                "distance_km": metrics.get(
-                    "distance_km"
-                ),
-                "duration_min": metrics.get(
-                    "duration_min"
-                ),
-                "provider": metrics.get(
+    time_change = None
+
+    if (
+        original_time is not None
+        and candidate_time is not None
+    ):
+
+        time_change = (
+            candidate_time
+            - original_time
+        )
+
+    return {
+        "original": {
+            "distance_km": (
+                original_distance
+            ),
+            "travel_time_min": (
+                original_time
+            ),
+            "provider": (
+                original_metrics.get(
                     "provider"
+                )
+            ),
+        },
+        "candidate": {
+            "distance_km": (
+                candidate_distance
+            ),
+            "travel_time_min": (
+                candidate_time
+            ),
+            "provider": (
+                candidate_metrics.get(
+                    "provider"
+                )
+            ),
+        },
+        "distance_change_km": (
+            distance_change
+        ),
+        "travel_time_change_min": (
+            time_change
+        ),
+        "improved": (
+            distance_change is not None
+            and distance_change < 0
+        ),
+    }
+
+
+# ============================================================================
+# ROUTE SEQUENCE SUMMARY
+# ============================================================================
+
+def sequence_summary(
+    sequence: Sequence[
+        Dict[str, Any]
+    ],
+    metrics: Optional[
+        Dict[str, Any]
+    ] = None,
+) -> List[
+    Dict[str, Any]
+]:
+    """
+    Convert a route sequence into a UI/API-friendly
+    stop summary.
+
+    GPS values are copied exactly as supplied.
+
+    This function never modifies coordinates.
+    """
+
+    result = []
+
+    for position, stop in enumerate(
+        sequence,
+        start=1,
+    ):
+
+        result.append(
+            {
+                "sequence": position,
+                "customer_id": stop.get(
+                    "name"
+                ),
+                "customer_name": stop.get(
+                    "customer_name"
+                ),
+                "latitude": stop.get(
+                    "latitude"
+                ),
+                "longitude": stop.get(
+                    "longitude"
+                ),
+                "route": stop.get(
+                    "route"
                 ),
             }
         )
 
-    results.sort(
-        key=lambda result: (
-            result["distance_km"]
-            if result["distance_km"] is not None
-            else float("inf"),
-            result["duration_min"]
-            if result["duration_min"] is not None
-            else float("inf"),
-        )
+    return result
+
+
+# ============================================================================
+# MODULE INFO
+# ============================================================================
+
+def get_engine_info() -> Dict[str, Any]:
+    """
+    Return sequence engine capabilities.
+    """
+
+    engine = RoutingEngine()
+
+    road_available = (
+        engine.is_road_routing_available()
     )
 
-    for rank, result in enumerate(
-        results,
-        start=1,
-    ):
-        result["rank"] = rank
-
-    return results
+    return {
+        "engine": (
+            "Dairy Route Auto Sequence Engine"
+        ),
+        "version": (
+            SEQUENCE_ENGINE_VERSION
+        ),
+        "road_routing": (
+            road_available
+        ),
+        "primary_routing": (
+            "OSRM"
+            if road_available
+            else "Haversine fallback"
+        ),
+        "optimization": [
+            "nearest_neighbor",
+            "2-opt",
+            "insertion_optimization",
+        ],
+        "database_write": False,
+        "gps_modification": False,
+    }
